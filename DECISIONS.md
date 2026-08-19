@@ -81,4 +81,45 @@ synthetic normal sample for the "approximately uniform after transform"
 check (spec §29.2). This is not part of the public API and is unrelated to
 the seeded RNG module (`rng/rng.c`) the spec schedules for the sampling and
 simulated-annealing milestones — that module doesn't exist yet and
-shouldn't be built before it's needed.
+shouldn't be built before it's needed. The same small block is duplicated
+(not shared via a header) in the Milestone 3 test files and the Milestone 3
+example for the same reason — see below.
+
+---
+
+## Milestone 3 — pairwise distance correlation
+
+**`dependence_matrix.c` added as a new file beyond the two the spec names
+under `dcor/`.**
+Spec §22 lists only `dcor_exact.c` and `dcor_fast.c` under `dcor/`, but §5
+("Pairwise Dependence Matrix") describes a distinct concern from raw
+two-vector dCor: extracting the pairwise-complete set `O_jk = O_j ∩ O_k`
+per pair, looping over all `(j,k)`, and storing both the `d x d` matrix and
+the effective-sample-size matrix. Keeping `dcor_exact.c` focused purely on
+"dCor of two paired 1D arrays" and putting that orchestration in a
+sibling `dependence_matrix.c` mirrors how `marginal_model.c` was kept
+separate from the raw Gaussian-mixture math in Milestone 1/2.
+
+**Approximate ("fast") distance-correlation backend not implemented.**
+Spec §5 says an accelerated backend "may be added for large n" and "must
+be selectable" if it exists — it does not mandate one for v1. Only the
+exact O(n²) backend (`hdcd_dcor_exact`) exists; `dcor_fast.c` is deferred
+until a milestone actually needs it (consistent with §31 M14 deferring all
+performance work).
+
+**Degenerate cases return a value rather than an error.**
+`hdcd_dcor_exact` returns `dCor = 0` (not an error) for a constant input
+series, since the 0/0 the raw formula produces is a well-defined limiting
+case, not a caller mistake. `hdcd_compute_dependence_matrix` returns `NaN`
+(not an error) for a pair with fewer than 2 pairwise-complete rows, since
+dCor is mathematically undefined there — the caller is expected to check
+the stored effective sample size (`hdcd_dependence_matrix_n_effective`)
+rather than have a fabricated number silently masquerade as a real
+correlation.
+
+**Diagonal is hardcoded to exactly 1.0, not computed via `dCor(U_j, U_j)`.**
+Floating-point self-correlation would land extremely close to 1 but not
+bit-exact, and there's no ambiguity about what the diagonal should be by
+definition. This also sidesteps a degenerate edge case: a dimension with
+zero variance would otherwise make `dCor(U_j, U_j)` itself hit the 0/0
+guard and incorrectly report 0 instead of a self-correlation of 1.

@@ -1,7 +1,8 @@
 # hdcd build: core numerics, Gaussian-mixture marginal smoother (Milestone 1),
-# and the copula transform x -> u (Milestone 2). DAGs, distance correlation,
-# topology, Bernstein basis, Sinkhorn normalization, EVT tails, and language
-# bindings are excluded until their respective milestones (spec section 31).
+# the copula transform x -> u (Milestone 2), and pairwise distance
+# correlation (Milestone 3). DAGs, topology, Bernstein basis, Sinkhorn
+# normalization, EVT tails, and language bindings are excluded until their
+# respective milestones (spec section 31).
 
 CC ?= cc
 CFLAGS ?= -std=c99 -Wall -Wextra -Wpedantic -O2 -g
@@ -18,7 +19,9 @@ LIB_SRCS := \
   src/marginal/gaussian_density_mix.c \
   src/marginal/bandwidth_cv.c \
   src/marginal/marginal_model.c \
-  src/copula/transform.c
+  src/copula/transform.c \
+  src/dcor/dcor_exact.c \
+  src/dcor/dependence_matrix.c
 LIB_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 STATIC_LIB := $(BUILD_DIR)/libhdcd.a
 
