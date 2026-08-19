@@ -23,6 +23,17 @@ typedef struct hdcd_dag_fit hdcd_dag_fit_t;
  * an additive factorization exploited directly by
  * hdcd_dag_fit_joint_log_density.
  *
+ * `dag` may be ANY valid DAG over d nodes -- the reference DAG built by
+ * annealing (Milestone 8), or an arbitrary candidate with a completely
+ * different topological order supplied via hdcd_dag_from_edges (spec
+ * section 19: "the public API must accept an arbitrary DAG G*"). This
+ * function reads each node's parent set directly from `dag` and fits
+ * nodes independently, so it has no notion of -- and imposes no
+ * requirement on -- any particular ordering; the acyclicity spec
+ * section 19 step 1 asks for is validated once, at DAG-construction
+ * time (hdcd_dag_add_edge incrementally, or hdcd_dag_from_edges in
+ * bulk), not here.
+ *
  * `dag`'s dimension must match `d`. The SAME hdcd_local_fit_options_t is
  * used for every node (a v1 simplification -- spec section 9 permits
  * node-wise Bernstein-degree tuning, not implemented here; see
@@ -66,6 +77,40 @@ hdcd_status_t hdcd_dag_fit_joint_log_density(
     const double *u_point, size_t d,
     double *out
 );
+
+/*
+ * Estimated KL divergence of `fit`'s factorization from the reference
+ * dependence distribution, up to a shared additive constant (spec
+ * section 15): sum_j K_hat_j(Pa(j)) = sum_j -(held-out normalized local
+ * score). The missing constant (the entropy of c*) is identical for
+ * any two fits over the SAME data, so it cancels in
+ * hdcd_dag_fit_kl_difference -- this quantity alone is only meaningful
+ * as a component of that difference, not as a standalone divergence
+ * value. NaN if `fit` is NULL.
+ */
+double hdcd_dag_fit_kl_estimate(const hdcd_dag_fit_t *fit);
+
+/*
+ * Delta_KL = kl_estimate(candidate) - kl_estimate(reference) (spec
+ * section 19): how much dependence information is lost when the joint
+ * distribution is constrained to factor according to `candidate`
+ * instead of `reference`. Both must be hdcd_dag_fit results over the
+ * SAME dataset (same n, d, u, mask) for the comparison to be
+ * meaningful; this function only checks that their dimensions agree
+ * (returns NaN if they don't), since it does not retain the training
+ * data to check more than that.
+ *
+ * Positive means candidate fits the data WORSE than reference; negative
+ * means candidate fits BETTER. This is a purely observational,
+ * distributional-fit comparison (spec section 19): it does NOT by
+ * itself establish causal direction, and does NOT distinguish between
+ * Markov-equivalent causal DAGs without additional assumptions or
+ * interventions neither `candidate` nor `reference` encode. Treat a
+ * favorable Delta_KL as evidence that `candidate`'s factorization is a
+ * good statistical approximation, not as evidence that its edges are
+ * causal.
+ */
+double hdcd_dag_fit_kl_difference(const hdcd_dag_fit_t *candidate, const hdcd_dag_fit_t *reference);
 
 #ifdef __cplusplus
 }

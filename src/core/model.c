@@ -1,5 +1,6 @@
 #include "hdcd/dag_fit.h"
 
+#include <math.h>
 #include <stdlib.h>
 
 struct hdcd_dag_fit {
@@ -157,4 +158,22 @@ hdcd_status_t hdcd_dag_fit_joint_log_density(
     free(z_buf);
     *out = total;
     return HDCD_OK;
+}
+
+double hdcd_dag_fit_kl_estimate(const hdcd_dag_fit_t *fit) {
+    if (fit == NULL) {
+        return NAN;
+    }
+    double total = 0.0;
+    for (size_t j = 0; j < fit->d; j++) {
+        total += -hdcd_local_fit_holdout_score(fit->nodes[j]);
+    }
+    return total;
+}
+
+double hdcd_dag_fit_kl_difference(const hdcd_dag_fit_t *candidate, const hdcd_dag_fit_t *reference) {
+    if (candidate == NULL || reference == NULL || candidate->d != reference->d) {
+        return NAN;
+    }
+    return hdcd_dag_fit_kl_estimate(candidate) - hdcd_dag_fit_kl_estimate(reference);
 }

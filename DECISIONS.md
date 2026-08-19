@@ -554,3 +554,90 @@ loop itself).
 from the empty graph, dropping `J(G)` from `0` to `-0.78`, in well under
 a second across 3 restarts — a genuine (if small) discovery, not a
 tautology, since the search never sees the true structure, only data.
+
+---
+
+## Milestone 9 — alternative-DAG comparison
+
+**Added `hdcd_dag_from_edges`, a new bulk DAG constructor, specifically
+because `hdcd_dag_add_edge` makes cyclic graphs unconstructible by
+design.** Spec §31 M9's acceptance criteria explicitly include "rejects
+cyclic graphs" — but with only the Milestone 7 API available, there was
+no way to even *build* a cyclic `hdcd_dag_t` to test rejection against,
+since every edge is checked for a would-create-a-cycle condition the
+moment it's added. Spec §19 itself points at the resolution: it frames
+the alternative-DAG workflow as taking an arbitrary candidate graph and
+validating it "independently of the reference ordering" as an explicit
+first step — i.e., the input is expected to be a raw specification that
+*needs* validating, not something pre-guaranteed valid by incremental
+construction. `hdcd_dag_from_edges` accepts a full edge list up front
+(checking only range/self-loop/duplicate/`k_max` per edge, deliberately
+skipping the reachability check) and validates the *whole* resulting
+graph once at the end via `hdcd_dag_topological_order` (already built in
+Milestone 7 as a general, construction-method-independent validator) —
+so a genuinely cyclic edge set can now actually be supplied, and is then
+cleanly rejected with `HDCD_ERROR_NUMERICAL`. Both DAG constructors
+converge on the same invariant (every `hdcd_dag_t` that exists is
+acyclic), just enforced at different points — incrementally for
+`add_edge`, once in bulk for `from_edges` — so nothing downstream
+(`hdcd_dag_fit`, annealing) needs to re-validate; the invariant is
+established once, at construction time, regardless of which
+constructor built the graph.
+
+**`hdcd_dag_fit` needed NO changes to support arbitrary/alternative
+DAGs.** It was already fully ordering-agnostic from Milestone 7 — it
+reads each node's parent set directly off the `hdcd_dag_t` and fits
+nodes independently, with no reference to any topological order at all
+(fitting a node's local conditional factor only needs that node's own
+column and its parents' columns from the data, nothing about *other*
+nodes' fit order). Spec §19 step 3 ("fit the conditional copula factors
+under that graph") was therefore already satisfied; Milestone 9's actual
+new work was making the *input* (arbitrary candidate DAGs, potentially
+cyclic) safely constructible and validatable, not the fitting itself.
+
+**`hdcd_dag_fit_kl_estimate`/`hdcd_dag_fit_kl_difference` are two-line
+formulas over existing Milestone 7 outputs, not new estimation
+machinery.** Spec §15 defines `K_j(P) = -E_c*[log c_j(U_j|U_P)]`;
+Milestone 7's held-out normalized score `ell_bar_j(P)` (computed on data
+the fit never trained on, specifically so it's comparable across
+differently-sized parent sets — spec §16) already *is* this quantity's
+empirical estimate. `kl_estimate` just negates and sums
+`hdcd_local_fit_holdout_score` across nodes; `kl_difference` subtracts
+two such sums. The missing shared constant (spec §15: "the entropy term
+of `c*` does not depend on `G`") cancels automatically in the
+difference, which is exactly the quantity spec §19 asks for and the only
+one of the two functions meaningful on its own.
+
+**`kl_difference` checks only that the two fits' dimensions match, not
+that they were fit on the same underlying data.** `hdcd_dag_fit_t`
+doesn't retain a pointer to its training data (each `hdcd_local_fit_t`
+only keeps what it needs — the fitted Sinkhorn state and Θ — not a copy
+of the original dataset), so there is no cheap way to verify "same data"
+beyond dimension agreement. Documented explicitly in the header as the
+caller's responsibility, rather than silently pretending to guarantee
+something that isn't actually checked.
+
+**Verified end-to-end with a three-way comparison, not just a pairwise
+one:** the test builds the true chain (`0->1->2`) as the reference,
+plus two deliberately different alternatives — the reversed-direction
+skeleton (built via `hdcd_dag_from_edges`, exercising the
+different-topological-order acceptance criterion directly) and the
+fully independent empty graph — and confirms `Δ_KL(empty) >
+Δ_KL(reversed) > 0`: discarding the dependency entirely loses strictly
+more information than merely getting its direction wrong along the same
+skeleton. This wasn't obvious in advance (a chain's *pairwise* Gaussian
+dependency is symmetric in direction even though its *factorization*
+isn't) and held up empirically, giving real confidence the KL-difference
+machinery is measuring something sensible rather than an arbitrary
+number.
+
+**The non-causal disclaimer (spec §19's closing paragraph, echoed in
+§34) is stated in three places, not left to a single docstring:** the
+`hdcd_dag_fit_kl_difference` doc comment, the top-of-file umbrella
+header (`hdcd.h`) comment (so it's visible to anyone who only reads the
+umbrella header), and the example's printed output. Spec §31 M9's fourth
+acceptance criterion ("does not label statistical comparison as causal
+identification") is a documentation/communication requirement, not a
+numerically-testable one — satisfying it means making the caveat hard to
+miss wherever this functionality is encountered, not just present
+somewhere.

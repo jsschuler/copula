@@ -2,10 +2,10 @@
 # the copula transform x -> u (Milestone 2), pairwise distance correlation
 # (Milestone 3), MST/persistent-topology ordering (Milestone 4), the
 # centered Bernstein tensor basis (Milestone 5), Sinkhorn normalization
-# (Milestone 6), fixed-DAG fitting (Milestone 7), and simulated-annealing
-# DAG search (Milestone 8). Alternative-DAG comparison, EVT tails, and
-# language bindings are excluded until their respective milestones
-# (spec section 31).
+# (Milestone 6), fixed-DAG fitting (Milestone 7), simulated-annealing DAG
+# search (Milestone 8), and arbitrary-DAG / held-out-KL comparison
+# (Milestone 9). EVT tails and language bindings are excluded until their
+# respective milestones (spec section 31).
 
 CC ?= cc
 CFLAGS ?= -std=c99 -Wall -Wextra -Wpedantic -O2 -g

@@ -133,20 +133,13 @@ static int is_reachable(const hdcd_dag_t *dag, size_t start, size_t target) {
     return found;
 }
 
-hdcd_status_t hdcd_dag_add_edge(hdcd_dag_t *dag, size_t parent, size_t child) {
-    if (dag == NULL || parent == child || parent >= dag->d || child >= dag->d) {
-        return HDCD_ERROR_INVALID_ARGUMENT;
-    }
-    if (hdcd_dag_has_edge(dag, parent, child)) {
-        return HDCD_ERROR_INVALID_ARGUMENT;
-    }
-    if (dag->n_parents[child] >= dag->k_max) {
-        return HDCD_ERROR_INVALID_ARGUMENT;
-    }
-    if (is_reachable(dag, child, parent)) {
-        return HDCD_ERROR_INVALID_ARGUMENT; /* would create a cycle */
-    }
-
+/* Insert parent->child assuming range/self-loop/duplicate/k_max have
+ * already been checked by the caller; does NOT check for cycles. Shared
+ * by hdcd_dag_add_edge (which adds the reachability check before
+ * calling this) and hdcd_dag_from_edges (which instead validates the
+ * whole edge set at once, after inserting all of it -- spec section 19
+ * step 1). */
+static hdcd_status_t insert_edge_unchecked(hdcd_dag_t *dag, size_t parent, size_t child) {
     if (dag->n_parents[child] == dag->capacity[child]) {
         size_t new_cap = (dag->capacity[child] == 0) ? 4 : dag->capacity[child] * 2;
         size_t *grown = (size_t *)realloc(dag->parents[child], new_cap * sizeof(size_t));
@@ -167,6 +160,23 @@ hdcd_status_t hdcd_dag_add_edge(hdcd_dag_t *dag, size_t parent, size_t child) {
     dag->n_parents[child]++;
 
     return HDCD_OK;
+}
+
+hdcd_status_t hdcd_dag_add_edge(hdcd_dag_t *dag, size_t parent, size_t child) {
+    if (dag == NULL || parent == child || parent >= dag->d || child >= dag->d) {
+        return HDCD_ERROR_INVALID_ARGUMENT;
+    }
+    if (hdcd_dag_has_edge(dag, parent, child)) {
+        return HDCD_ERROR_INVALID_ARGUMENT;
+    }
+    if (dag->n_parents[child] >= dag->k_max) {
+        return HDCD_ERROR_INVALID_ARGUMENT;
+    }
+    if (is_reachable(dag, child, parent)) {
+        return HDCD_ERROR_INVALID_ARGUMENT; /* would create a cycle */
+    }
+
+    return insert_edge_unchecked(dag, parent, child);
 }
 
 hdcd_status_t hdcd_dag_remove_edge(hdcd_dag_t *dag, size_t parent, size_t child) {
@@ -299,5 +309,69 @@ hdcd_status_t hdcd_dag_clone(const hdcd_dag_t *src, hdcd_dag_t **out) {
     }
 
     *out = clone;
+    return HDCD_OK;
+}
+
+hdcd_status_t hdcd_dag_from_edges(
+    size_t d, size_t k_max,
+    const size_t *edge_parents, const size_t *edge_children, size_t n_edges,
+    hdcd_dag_t **out
+) {
+    if (out == NULL || d == 0) {
+        return HDCD_ERROR_INVALID_ARGUMENT;
+    }
+    if (n_edges > 0 && (edge_parents == NULL || edge_children == NULL)) {
+        return HDCD_ERROR_INVALID_ARGUMENT;
+    }
+    *out = NULL;
+
+    hdcd_dag_t *dag = NULL;
+    hdcd_status_t status = hdcd_dag_create(d, k_max, &dag);
+    if (status != HDCD_OK) {
+        return status;
+    }
+
+    for (size_t e = 0; e < n_edges; e++) {
+        size_t parent = edge_parents[e];
+        size_t child = edge_children[e];
+        if (parent == child || parent >= d || child >= d) {
+            hdcd_dag_free(dag);
+            return HDCD_ERROR_INVALID_ARGUMENT;
+        }
+        if (hdcd_dag_has_edge(dag, parent, child)) {
+            hdcd_dag_free(dag);
+            return HDCD_ERROR_INVALID_ARGUMENT; /* duplicate edge */
+        }
+        if (dag->n_parents[child] >= dag->k_max) {
+            hdcd_dag_free(dag);
+            return HDCD_ERROR_INVALID_ARGUMENT;
+        }
+        /* No reachability check here, deliberately: the whole edge set
+         * is validated ONCE at the end via hdcd_dag_topological_order
+         * (spec section 19 step 1, "validate acyclicity independently
+         * of the reference ordering"), so a genuinely cyclic input edge
+         * set can actually be constructed and rejected -- unlike
+         * hdcd_dag_add_edge, which makes a cycle unconstructible by
+         * design and so can never be observed to reject one. */
+        status = insert_edge_unchecked(dag, parent, child);
+        if (status != HDCD_OK) {
+            hdcd_dag_free(dag);
+            return status;
+        }
+    }
+
+    size_t *order = (size_t *)malloc(d * sizeof(size_t));
+    if (order == NULL) {
+        hdcd_dag_free(dag);
+        return HDCD_ERROR_ALLOCATION;
+    }
+    status = hdcd_dag_topological_order(dag, order);
+    free(order);
+    if (status != HDCD_OK) {
+        hdcd_dag_free(dag); /* cyclic (or otherwise invalid): reject, don't return a broken DAG */
+        return status;
+    }
+
+    *out = dag;
     return HDCD_OK;
 }

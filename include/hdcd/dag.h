@@ -62,6 +62,28 @@ hdcd_status_t hdcd_dag_topological_order(const hdcd_dag_t *dag, size_t *order_ou
  */
 hdcd_status_t hdcd_dag_clone(const hdcd_dag_t *src, hdcd_dag_t **out);
 
+/*
+ * Build a DAG from a raw list of (parent, child) edges (spec section
+ * 19: "the public API must accept an arbitrary DAG G*, including a DAG
+ * with a different topological ordering"). Unlike hdcd_dag_add_edge,
+ * this does NOT incrementally reject edges that would create a cycle
+ * as they're added -- it accepts the whole edge set as given and
+ * validates acyclicity ONCE at the end via hdcd_dag_topological_order
+ * (spec section 19 step 1), so a genuinely cyclic edge set can actually
+ * be supplied and is then cleanly rejected, rather than being
+ * unconstructible by construction the way hdcd_dag_add_edge makes it.
+ *
+ * `edge_parents`/`edge_children` are parallel arrays of length n_edges.
+ * Returns HDCD_ERROR_INVALID_ARGUMENT for an out-of-range index, a
+ * self-loop, a duplicate edge, or any node exceeding k_max parents;
+ * HDCD_ERROR_NUMERICAL if the edge set contains a cycle.
+ */
+hdcd_status_t hdcd_dag_from_edges(
+    size_t d, size_t k_max,
+    const size_t *edge_parents, const size_t *edge_children, size_t n_edges,
+    hdcd_dag_t **out
+);
+
 #ifdef __cplusplus
 }
 #endif
