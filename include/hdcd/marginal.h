@@ -2,6 +2,7 @@
 #define HDCD_MARGINAL_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include "hdcd/status.h"
 
 #ifdef __cplusplus
@@ -84,6 +85,56 @@ hdcd_status_t hdcd_select_bandwidth_loo(
     double sigma_min, double sigma_max,
     double tol, int max_iter,
     hdcd_bandwidth_result_t *out
+);
+
+/* ---- fitted marginal object (spec section 31, Milestone 2) ----------- */
+
+/*
+ * Opaque handle for a marginal fitted to dimension j of the input data.
+ * Owns a copy of the observed training values (data[i] such that
+ * observed_mask[i] != 0), per O_j in spec section 2, plus the bandwidth
+ * selected for it.
+ */
+typedef struct hdcd_marginal hdcd_marginal_t;
+
+/*
+ * Fit a Gaussian-smoothed marginal to dimension j via leave-one-out
+ * bandwidth cross-validation (spec section 2.1), using only the entries
+ * where observed_mask[i] != 0.
+ *
+ * `x` and `observed_mask` have the same shape (spec section 23):
+ * missingness is carried by the mask, not by NaN sentinels in `x`.
+ * sigma_min/sigma_max/tol/max_iter are forwarded to
+ * hdcd_select_bandwidth_loo (sigma_min <= 0 or sigma_max <= 0 selects
+ * the default robust-scale-derived bounds).
+ *
+ * Requires at least 2 observed entries. On success, *out is a newly
+ * allocated handle that must be released with hdcd_marginal_free.
+ */
+hdcd_status_t hdcd_marginal_fit(
+    const double *x, const uint8_t *observed_mask, size_t n,
+    double sigma_min, double sigma_max,
+    double tol, int max_iter,
+    hdcd_marginal_t **out
+);
+
+void hdcd_marginal_free(hdcd_marginal_t *marginal);
+
+/* Number of observed training entries used to fit this marginal (n_j). */
+size_t hdcd_marginal_n_observed(const hdcd_marginal_t *marginal);
+
+/* Bandwidth-selection diagnostics recorded at fit time. */
+hdcd_bandwidth_result_t hdcd_marginal_bandwidth_result(const hdcd_marginal_t *marginal);
+
+/*
+ * Evaluate the fitted marginal CDF F_hat_j at eval_points[0..m-1].
+ * Equivalent to calling hdcd_gaussian_mixture_cdf with this marginal's
+ * stored training data and selected sigma.
+ */
+hdcd_status_t hdcd_marginal_cdf(
+    const hdcd_marginal_t *marginal,
+    const double *eval_points, size_t m,
+    double *out
 );
 
 #ifdef __cplusplus

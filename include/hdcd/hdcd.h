@@ -2,15 +2,16 @@
 #define HDCD_H
 
 /*
- * Top-level umbrella header. As of Milestone 1, only the core numerics
- * and marginal Gaussian-mixture smoother are implemented (spec section
- * 37, "First Claude Code Task"). DAGs, distance correlation, topology,
- * Sinkhorn normalization, and language wrappers are deliberately absent
- * until Milestone 1's acceptance tests pass.
+ * Top-level umbrella header. Through Milestone 2, the library covers
+ * core numerics, the marginal Gaussian-mixture smoother, and the
+ * copula transform x -> u (spec section 31). DAGs, distance
+ * correlation, topology, Sinkhorn normalization, and language wrappers
+ * are deliberately absent until their respective milestones.
  */
 
 #include "hdcd/status.h"
 #include "hdcd/numerics.h"
 #include "hdcd/marginal.h"
+#include "hdcd/copula.h"
 
 #endif /* HDCD_H */
