@@ -9,6 +9,8 @@ export(hdcd_ordering)
 export(hdcd_dag)
 export(hdcd_fit_dag)
 export(hdcd_score_dag)
+export(hdcd_node_parents)
+export(hdcd_conditional_density)
 
 S3method(predict, hdcd_model)
 S3method(print, hdcd_model)

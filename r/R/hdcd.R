@@ -98,6 +98,19 @@
   .Call("hdcd_r_dag_fit_kl_difference", candidate_ext, reference_ext)
 }
 
+.local_fit_n_parents <- function(dag_fit_ext, node_1idx) {
+  .Call("hdcd_r_local_fit_n_parents", dag_fit_ext, as.integer(node_1idx))
+}
+
+.local_fit_parent_order <- function(dag_fit_ext, node_1idx) {
+  .Call("hdcd_r_local_fit_parent_order", dag_fit_ext, as.integer(node_1idx))
+}
+
+.local_fit_conditional_log_density <- function(dag_fit_ext, node_1idx, u, z) {
+  .Call("hdcd_r_local_fit_conditional_log_density", dag_fit_ext, as.integer(node_1idx),
+        as.double(u), as.double(z))
+}
+
 .run_annealing_c <- function(u, n, d, ordering_1idx, k_max, lambda_edge,
                               bernstein_degree, lambda_roughness, holdout_fraction, local_seed,
                               initial_temperature, cooling_rate, max_iterations, restarts,
@@ -171,6 +184,9 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
     holdout_fraction = holdout_fraction,
     local_seed = local_seed,
     best_score = annealed$score,
+    score_trace = annealed$score_trace,
+    accepted_trace = annealed$accepted_trace,
+    acceptance_rate = annealed$acceptance_rate,
     U = U,
     X = X
   )
@@ -341,4 +357,35 @@ hdcd_score_dag <- function(model, candidate_fit) {
   stopifnot(inherits(model, "hdcd_model"))
   stopifnot(inherits(candidate_fit, "hdcd_dag_fit"))
   .dag_fit_kl_difference(candidate_fit$dag_fit, model$dag_fit)
+}
+
+#' The fitted parents of one node in the reference DAG
+#'
+#' @param model an `hdcd_model`.
+#' @param node the 1-indexed column index of the node.
+#' @return an integer vector of 1-indexed parent column indices (possibly empty).
+#' @export
+hdcd_node_parents <- function(model, node) {
+  stopifnot(inherits(model, "hdcd_model"))
+  .local_fit_parent_order(model$dag_fit, node)
+}
+
+#' Conditional copula density c_j(u | z) for one node, over a grid of u
+#'
+#' Evaluates the fitted conditional density directly (not via
+#' [hdcd_copula_logpdf()], which needs a full d-length row) -- useful
+#' for plotting one edge's fitted density curve against its true
+#' counterpart.
+#'
+#' @param model an `hdcd_model`.
+#' @param node the 1-indexed column index of the node.
+#' @param u a numeric vector of copula-scale evaluation points in (0,1).
+#' @param z the parent(s)' copula-scale value(s): a numeric vector whose
+#'   length must match `length(hdcd_node_parents(model, node))`; empty
+#'   for a root node.
+#' @return a numeric vector the same length as `u`: `c_node(u | z)`.
+#' @export
+hdcd_conditional_density <- function(model, node, u, z = numeric(0)) {
+  stopifnot(inherits(model, "hdcd_model"))
+  exp(.local_fit_conditional_log_density(model$dag_fit, node, u, z))
 }

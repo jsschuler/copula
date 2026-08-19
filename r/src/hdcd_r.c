@@ -368,6 +368,75 @@ SEXP hdcd_r_dag_fit_kl_difference(SEXP candidate_ext, SEXP reference_ext) {
     return Rf_ScalarReal(hdcd_dag_fit_kl_difference(candidate, reference));
 }
 
+/* Per-node diagnostics: which columns are node j's parents, and the
+ * node's own conditional log-density curve c_j(u|z) for a fixed z --
+ * needed to plot a fitted conditional density against its known-true
+ * counterpart (not needed by any milestone's own acceptance criteria,
+ * added for the validation notebook in Rmd/). `node_1idx` is R's
+ * 1-indexed node number; the returned parent indices are also
+ * 1-indexed, for direct use as R column indices. */
+
+SEXP hdcd_r_local_fit_n_parents(SEXP dag_fit_ext, SEXP node_1idx) {
+    hdcd_dag_fit_t *fit = (hdcd_dag_fit_t *)unwrap_pointer(dag_fit_ext, "dag_fit");
+    size_t j = (size_t)(Rf_asInteger(node_1idx) - 1);
+    const hdcd_local_fit_t *node = hdcd_dag_fit_node(fit, j);
+    if (node == NULL) {
+        Rf_error("invalid node index");
+    }
+    return Rf_ScalarInteger((int)hdcd_local_fit_n_parents(node));
+}
+
+SEXP hdcd_r_local_fit_parent_order(SEXP dag_fit_ext, SEXP node_1idx) {
+    hdcd_dag_fit_t *fit = (hdcd_dag_fit_t *)unwrap_pointer(dag_fit_ext, "dag_fit");
+    size_t j = (size_t)(Rf_asInteger(node_1idx) - 1);
+    const hdcd_local_fit_t *node = hdcd_dag_fit_node(fit, j);
+    if (node == NULL) {
+        Rf_error("invalid node index");
+    }
+    size_t np = hdcd_local_fit_n_parents(node);
+    const size_t *order = hdcd_local_fit_parent_order(node);
+    SEXP out = PROTECT(Rf_allocVector(INTSXP, (int)np));
+    int *outp = INTEGER(out);
+    for (size_t i = 0; i < np; i++) {
+        outp[i] = (int)order[i] + 1;
+    }
+    UNPROTECT(1);
+    return out;
+}
+
+SEXP hdcd_r_local_fit_conditional_log_density(SEXP dag_fit_ext, SEXP node_1idx, SEXP u_vec, SEXP z_vec) {
+    hdcd_dag_fit_t *fit = (hdcd_dag_fit_t *)unwrap_pointer(dag_fit_ext, "dag_fit");
+    size_t j = (size_t)(Rf_asInteger(node_1idx) - 1);
+    const hdcd_local_fit_t *node = hdcd_dag_fit_node(fit, j);
+    if (node == NULL) {
+        Rf_error("invalid node index");
+    }
+
+    size_t n_parents = hdcd_local_fit_n_parents(node);
+    size_t z_len = (size_t)Rf_xlength(z_vec);
+    if (z_len != n_parents) {
+        Rf_error("z has length %zu but node %d has %zu parent(s)", z_len, Rf_asInteger(node_1idx), n_parents);
+    }
+
+    size_t m = (size_t)Rf_xlength(u_vec);
+    double *up = REAL(u_vec);
+    double *zp = (n_parents > 0) ? REAL(z_vec) : NULL;
+
+    SEXP out = PROTECT(Rf_allocVector(REALSXP, (int)m));
+    double *outp = REAL(out);
+    for (size_t i = 0; i < m; i++) {
+        double log_c;
+        hdcd_status_t status = hdcd_local_fit_log_density(node, up[i], zp, n_parents, &log_c);
+        if (status != HDCD_OK) {
+            UNPROTECT(1);
+            Rf_error("hdcd error: %s", hdcd_status_message(status));
+        }
+        outp[i] = log_c;
+    }
+    UNPROTECT(1);
+    return out;
+}
+
 /* ---- annealing (hdcd/annealing.h) ---------------------------------------- */
 
 SEXP hdcd_r_run_annealing(
@@ -421,18 +490,40 @@ SEXP hdcd_r_run_annealing(
     hdcd_dag_t *best_clone = NULL;
     hdcd_status_t clone_status = hdcd_dag_clone(best, &best_clone);
     double best_score = hdcd_annealing_best_score(result);
+    double acceptance_rate = hdcd_annealing_acceptance_rate(result);
+
+    /* Score/accepted traces (spec section 17.2: "score trace;
+     * acceptance-rate trace") -- a useful "did the search actually
+     * converge" diagnostic for the validation notebook in Rmd/. Must be
+     * extracted BEFORE freeing `result` below. */
+    size_t n_iter = hdcd_annealing_n_iterations(result);
+    SEXP score_trace = PROTECT(Rf_allocVector(REALSXP, (int)n_iter));
+    SEXP accepted_trace = PROTECT(Rf_allocVector(LGLSXP, (int)n_iter));
+    double *score_p = REAL(score_trace);
+    int *accepted_p = LOGICAL(accepted_trace);
+    for (size_t i = 0; i < n_iter; i++) {
+        score_p[i] = hdcd_annealing_score_trace(result, i);
+        accepted_p[i] = hdcd_annealing_accepted_trace(result, i);
+    }
+
     hdcd_annealing_result_free(result);
     check_status(clone_status, 0);
 
     SEXP dag_sexp = PROTECT(wrap_pointer(best_clone, dag_finalizer, "hdcd_dag"));
-    SEXP out = PROTECT(Rf_allocVector(VECSXP, 2));
+    SEXP out = PROTECT(Rf_allocVector(VECSXP, 5));
     SET_VECTOR_ELT(out, 0, dag_sexp);
     SET_VECTOR_ELT(out, 1, Rf_ScalarReal(best_score));
-    SEXP names = PROTECT(Rf_allocVector(STRSXP, 2));
+    SET_VECTOR_ELT(out, 2, score_trace);
+    SET_VECTOR_ELT(out, 3, accepted_trace);
+    SET_VECTOR_ELT(out, 4, Rf_ScalarReal(acceptance_rate));
+    SEXP names = PROTECT(Rf_allocVector(STRSXP, 5));
     SET_STRING_ELT(names, 0, Rf_mkChar("dag"));
     SET_STRING_ELT(names, 1, Rf_mkChar("score"));
+    SET_STRING_ELT(names, 2, Rf_mkChar("score_trace"));
+    SET_STRING_ELT(names, 3, Rf_mkChar("accepted_trace"));
+    SET_STRING_ELT(names, 4, Rf_mkChar("acceptance_rate"));
     Rf_setAttrib(out, R_NamesSymbol, names);
-    UNPROTECT(3);
+    UNPROTECT(5); /* score_trace, accepted_trace, dag_sexp, out, names */
     return out;
 }
 
@@ -459,6 +550,9 @@ static const R_CallMethodDef CallEntries[] = {
     {"hdcd_r_dag_fit_all_converged", (DL_FUNC)&hdcd_r_dag_fit_all_converged, 1},
     {"hdcd_r_dag_fit_kl_estimate", (DL_FUNC)&hdcd_r_dag_fit_kl_estimate, 1},
     {"hdcd_r_dag_fit_kl_difference", (DL_FUNC)&hdcd_r_dag_fit_kl_difference, 2},
+    {"hdcd_r_local_fit_n_parents", (DL_FUNC)&hdcd_r_local_fit_n_parents, 2},
+    {"hdcd_r_local_fit_parent_order", (DL_FUNC)&hdcd_r_local_fit_parent_order, 2},
+    {"hdcd_r_local_fit_conditional_log_density", (DL_FUNC)&hdcd_r_local_fit_conditional_log_density, 4},
     {"hdcd_r_run_annealing", (DL_FUNC)&hdcd_r_run_annealing, 18},
     {NULL, NULL, 0}
 };

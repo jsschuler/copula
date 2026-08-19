@@ -21,3 +21,9 @@ r/src/symbols.rds
 # Julia version generated it"; not worth committing.
 julia/Manifest.toml
 
+# Rendered notebook output (notebooks/, post-M12 validation) -- knitted
+# from the .Rmd source on demand; not worth committing.
+notebooks/*.html
+notebooks/*_files/
+notebooks/*_cache/
+

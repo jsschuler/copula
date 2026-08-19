@@ -926,3 +926,66 @@ gitignored (not committed): with `Libdl` (a stdlib, always bundled with
 the Julia installation) as the only dependency, it pins little beyond
 "which Julia version generated it," unlike a project with real external
 dependencies where a lockfile earns its keep.
+
+---
+
+## Post-M12 validation — end-to-end vine copula recovery notebook
+
+Requested explicitly before starting Milestones 13-14 (EVT module,
+performance work): an `.Rmd` notebook (`notebooks/vine_copula_recovery.Rmd`)
+that generates a complex, high-dimensional, known-ground-truth vine copula,
+recovers it with the R binding's full `hdcd` pipeline, times every stage,
+and produces conditional-density plots comparing the fitted result against
+the true, closed-form densities.
+
+**Ground truth is a tree-1-truncated D-vine (Markov chain), not a full
+multi-tree R-vine, after a fuller vine proved numerically fragile to
+generate.** A pilot chaining `copula::cCopula(..., inverse = TRUE)` calls
+through a second vine tree hit `uniroot()` failures (`f.lower = f(lower) is
+NA`) once an intermediate conditional value landed close to the `[0,1]`
+boundary after two chained h-function inversions — a fragility in
+generating the *ground truth itself*, unrelated to `hdcd`. Rather than ship
+a validation notebook whose reference structure might be silently wrong,
+committed to the simplest genuinely-valid vine member instead: a first-order
+chain (variable *i+1* generated from a pair-copula conditioned on variable
+*i* alone), mixing five different pair-copula families (Clayton, Gumbel,
+Frank, Gaussian, Student-*t*) with different strengths across nine edges at
+d=10. Still exercises full high-dimensional sparse-DAG recovery and diverse
+conditional-density shapes; verified correct before use via KS tests
+(uniform margins) and empirical-vs-true Kendall's tau per edge. A second,
+related numerical issue — chained h-inverse values landing exactly on `0`
+or `1` and then producing `Inf`/`NaN` one step later — was fixed by clipping
+every intermediate copula-scale value (not just the final output) to
+`[1e-6, 1-1e-6]` at each step of the chain.
+
+**Extended the R binding with two new exported functions,
+`hdcd_node_parents()` and `hdcd_conditional_density()`, plus score-trace
+fields on the fitted model (`score_trace`, `accepted_trace`,
+`acceptance_rate`), purely to support this notebook's diagnostics.** The
+existing R API had no way to evaluate one node's fitted conditional copula
+density on a grid of `u` values (needed to plot fitted-vs-true density
+curves) or to inspect the annealing search's convergence trace (needed to
+confirm the iteration budget was sufficient) — both are directly useful for
+any future model diagnostics, not one-off notebook plumbing, so they were
+added as first-class exported functions (`r/R/hdcd.R`, `r/src/hdcd_r.c`,
+`r/NAMESPACE`) rather than notebook-local hacks. Full `testthat` suite
+re-verified after the change: unchanged at 36/36 passing.
+
+**Calibrated hyperparameters for a ~30-second, honest demonstration at
+d=10, n=2000:** `max_parents=2, bernstein_degree=4, lambda_edge=0.05,
+lambda_roughness=0.15, holdout_fraction=0.25, annealing_iterations=600,
+annealing_restarts=3`. Measured result: total pipeline time ≈ 26 seconds
+(annealing search dominates); 9/9 true skeleton edges recovered, 8 in the
+exact generative direction and 1 direction-flipped; `Delta_KL(true DAG vs.
+recovered DAG) ≈ -0.035` (the true DAG scores only marginally better);
+mean fitted-vs-true conditional-density correlation ≈ 0.96 across all nine
+edges and three conditioning values each.
+
+**The one direction-flipped edge was kept and explained in the notebook,
+not tuned away.** For a Markov chain, the pairwise statistical dependence
+between adjacent variables is symmetric regardless of which is labeled
+"parent" in the reference DAG — `hdcd`'s own documentation and Milestone 9
+are explicit that the reference DAG is a density-factorization choice, not
+a causal claim (spec §19, §34). A near-tied `Delta_KL` on the flipped edge
+is direct, concrete evidence of that disclaimer rather than a defect to
+hide by re-seeding until it disappears.
