@@ -137,6 +137,19 @@ hdcd_status_t hdcd_marginal_cdf(
     double *out
 );
 
+/*
+ * Evaluate the fitted marginal log-density log f_hat_j at
+ * eval_points[0..m-1] (spec section 35: f_X(x) = c(F_1,...,F_d) *
+ * prod_j f_j(x_j) needs this term). Equivalent to calling
+ * hdcd_gaussian_mixture_logpdf with this marginal's stored training
+ * data and selected sigma.
+ */
+hdcd_status_t hdcd_marginal_logpdf(
+    const hdcd_marginal_t *marginal,
+    const double *eval_points, size_t m,
+    double *out
+);
+
 #ifdef __cplusplus
 }
 #endif

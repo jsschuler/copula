@@ -1,1 +1,10 @@
 build/
+
+# Python packaging/build artifacts (python/hdcd/, Milestone 10)
+python/build/
+python/hdcd.egg-info/
+python/hdcd/libhdcd.dylib
+python/hdcd/libhdcd.so
+__pycache__/
+*.pyc
+

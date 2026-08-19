@@ -68,6 +68,30 @@ static void test_cdf_monotonic_and_bounded(void) {
     HDCD_PASS("fitted marginal CDF is monotonic and bounded in [0,1]");
 }
 
+static void test_logpdf_matches_cdf_finite_difference(void) {
+    uint8_t mask[20];
+    for (int i = 0; i < 20; i++) mask[i] = 1;
+    hdcd_marginal_t *m = NULL;
+    HDCD_CHECK(hdcd_marginal_fit(sample_data, mask, 20, -1.0, -1.0, 1e-6, 200, &m) == HDCD_OK);
+
+    double points[4] = {-1.0, 0.0, 0.5, 1.5};
+    double logpdf[4];
+    HDCD_CHECK(hdcd_marginal_logpdf(m, points, 4, logpdf) == HDCD_OK);
+
+    double eps = 1e-6;
+    for (int i = 0; i < 4; i++) {
+        double x_lo = points[i] - eps, x_hi = points[i] + eps;
+        double cdf_lo, cdf_hi;
+        HDCD_CHECK(hdcd_marginal_cdf(m, &x_lo, 1, &cdf_lo) == HDCD_OK);
+        HDCD_CHECK(hdcd_marginal_cdf(m, &x_hi, 1, &cdf_hi) == HDCD_OK);
+        double finite_diff_density = (cdf_hi - cdf_lo) / (2.0 * eps);
+        HDCD_CHECK_NEAR(exp(logpdf[i]), finite_diff_density, 1e-5);
+    }
+
+    hdcd_marginal_free(m);
+    HDCD_PASS("fitted marginal logpdf matches the CDF's finite difference");
+}
+
 static void test_invalid_arguments(void) {
     uint8_t mask[20];
     for (int i = 0; i < 20; i++) mask[i] = 1;
@@ -80,17 +104,19 @@ static void test_invalid_arguments(void) {
                == HDCD_ERROR_INVALID_ARGUMENT);
 
     HDCD_CHECK(hdcd_marginal_cdf(NULL, sample_data, 1, sample_data) == HDCD_ERROR_INVALID_ARGUMENT);
+    HDCD_CHECK(hdcd_marginal_logpdf(NULL, sample_data, 1, sample_data) == HDCD_ERROR_INVALID_ARGUMENT);
 
     /* hdcd_marginal_free(NULL) must not crash. */
     hdcd_marginal_free(NULL);
 
-    HDCD_PASS("marginal fit/cdf reject invalid arguments");
+    HDCD_PASS("marginal fit/cdf/logpdf reject invalid arguments");
 }
 
 int main(void) {
     test_fit_all_observed();
     test_fit_with_missingness();
     test_cdf_monotonic_and_bounded();
+    test_logpdf_matches_cdf_finite_difference();
     test_invalid_arguments();
     printf("All marginal_model tests passed.\n");
     return 0;

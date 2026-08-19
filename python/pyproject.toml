@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hdcd"
+version = "0.1.0"
+description = "Python bindings for the hdcd high-dimensional copula density estimation C library"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.20"]
+
+[tool.setuptools]
+packages = ["hdcd"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+hdcd = ["libhdcd.dylib", "libhdcd.so"]

@@ -97,3 +97,16 @@ hdcd_status_t hdcd_marginal_cdf(
         marginal->data, marginal->n_obs, marginal->bandwidth.sigma, eval_points, m, out
     );
 }
+
+hdcd_status_t hdcd_marginal_logpdf(
+    const hdcd_marginal_t *marginal,
+    const double *eval_points, size_t m,
+    double *out
+) {
+    if (marginal == NULL) {
+        return HDCD_ERROR_INVALID_ARGUMENT;
+    }
+    return hdcd_gaussian_mixture_logpdf(
+        marginal->data, marginal->n_obs, marginal->bandwidth.sigma, eval_points, m, out
+    );
+}

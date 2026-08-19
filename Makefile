@@ -3,14 +3,24 @@
 # (Milestone 3), MST/persistent-topology ordering (Milestone 4), the
 # centered Bernstein tensor basis (Milestone 5), Sinkhorn normalization
 # (Milestone 6), fixed-DAG fitting (Milestone 7), simulated-annealing DAG
-# search (Milestone 8), and arbitrary-DAG / held-out-KL comparison
-# (Milestone 9). EVT tails and language bindings are excluded until their
+# search (Milestone 8), arbitrary-DAG / held-out-KL comparison (Milestone 9),
+# and the shared library the Python binding (Milestone 10) loads via
+# ctypes. EVT tails, R, and Julia bindings are excluded until their
 # respective milestones (spec section 31).
 
 CC ?= cc
-CFLAGS ?= -std=c99 -Wall -Wextra -Wpedantic -O2 -g
+CFLAGS ?= -std=c99 -Wall -Wextra -Wpedantic -O2 -g -fPIC
 INCLUDES := -Iinclude
 LDLIBS := -lm
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  SHARED_LIB := build/libhdcd.dylib
+  SHARED_LDFLAGS := -dynamiclib -install_name @rpath/libhdcd.dylib
+else
+  SHARED_LIB := build/libhdcd.so
+  SHARED_LDFLAGS := -shared -Wl,-soname,libhdcd.so
+endif
 
 BUILD_DIR := build
 LIB_SRCS := \
@@ -52,7 +62,7 @@ TEST_BINS := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%,$(TEST_SRCS))
 EXAMPLE_SRCS := $(wildcard examples/*.c)
 EXAMPLE_BINS := $(patsubst examples/%.c,$(BUILD_DIR)/examples/%,$(EXAMPLE_SRCS))
 
-.PHONY: all test examples clean
+.PHONY: all test examples shared clean
 
 all: $(STATIC_LIB) $(TEST_BINS) $(EXAMPLE_BINS)
 
@@ -63,6 +73,12 @@ $(BUILD_DIR)/%.o: %.c
 $(STATIC_LIB): $(LIB_OBJS)
 	@mkdir -p $(dir $@)
 	ar rcs $@ $^
+
+$(SHARED_LIB): $(LIB_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(SHARED_LDFLAGS) -o $@ $^ $(LDLIBS)
+
+shared: $(SHARED_LIB)
 
 $(BUILD_DIR)/tests/%: tests/%.c $(STATIC_LIB)
 	@mkdir -p $(dir $@)
