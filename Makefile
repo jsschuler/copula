@@ -1,9 +1,9 @@
 # hdcd build: core numerics, Gaussian-mixture marginal smoother (Milestone 1),
 # the copula transform x -> u (Milestone 2), pairwise distance correlation
-# (Milestone 3), MST/persistent-topology ordering (Milestone 4), and the
-# centered Bernstein tensor basis (Milestone 5). DAGs, Sinkhorn
-# normalization, EVT tails, and language bindings are excluded until their
-# respective milestones (spec section 31).
+# (Milestone 3), MST/persistent-topology ordering (Milestone 4), the
+# centered Bernstein tensor basis (Milestone 5), and Sinkhorn normalization
+# (Milestone 6). DAGs, EVT tails, and language bindings are excluded until
+# their respective milestones (spec section 31).
 
 CC ?= cc
 CFLAGS ?= -std=c99 -Wall -Wextra -Wpedantic -O2 -g
@@ -31,7 +31,9 @@ LIB_SRCS := \
   src/topology/topology.c \
   src/basis/bernstein.c \
   src/basis/centered_bernstein.c \
-  src/basis/difference_penalty.c
+  src/basis/difference_penalty.c \
+  src/numerics/quadrature.c \
+  src/sinkhorn/normalize.c
 LIB_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 STATIC_LIB := $(BUILD_DIR)/libhdcd.a
 

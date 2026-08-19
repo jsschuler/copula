@@ -82,6 +82,17 @@ hdcd_optimizer_1d_result_t hdcd_golden_section_maximize(
     int max_iter
 );
 
+/* ---- quadrature ------------------------------------------------------- */
+
+/*
+ * Composite Simpson's rule quadrature nodes and weights on [0,1].
+ * Requires n_nodes odd and >= 3 (n_nodes - 1 even subintervals). Both
+ * output arrays must have length n_nodes; the weights sum to 1 (up to
+ * floating-point rounding). Used as the deterministic default for the
+ * u-integral in Sinkhorn normalization (spec section 11.2).
+ */
+hdcd_status_t hdcd_simpson_nodes_weights(size_t n_nodes, double *nodes_out, double *weights_out);
+
 #ifdef __cplusplus
 }
 #endif

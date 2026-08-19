@@ -235,3 +235,72 @@ each index separately) to show a non-degenerate `g(u,z)` alongside
 `R(Theta)=0`. Worth remembering for later milestones: only the
 non-additively-separable part of an edge's `Theta` actually contributes
 to the conditional kernel at all.
+
+---
+
+## Milestone 6 — copula-preserving Sinkhorn normalization
+
+**Sinkhorn is a standalone module over an abstract raw-kernel callback,
+not wired to the Bernstein kernel or any DAG structure.**
+`hdcd_raw_kernel_fn` is `double (*)(double u, const double *z, size_t
+z_dim, void *userdata)` — Milestone 5's Bernstein tensor kernel is one
+possible caller of this, exercised in tests/the example via
+`exp(hdcd_bernstein_tensor_interaction(...))`, but `normalize.c` itself
+has no dependency on `bernstein.h` or any notion of parents/edges/DAGs
+(those don't exist until Milestone 7+). This mirrors the same
+"orchestration file stays generic, concrete kernel is the caller's
+problem" split already used for `dcor_exact.c` vs. `dependence_matrix.c`
+and `merge_tree.c`'s kernel-agnostic recurrence.
+
+**`z_samples` are caller-supplied, not drawn by this module.**
+Spec §11.2 says the `q_j(z)` expectation "may use Monte Carlo samples
+... permit cached parent samples" — read as license to accept
+externally-supplied draws rather than a mandate to implement sampling
+here. There is no machinery yet (Milestone 6) for sampling from a
+partially-built joint copula model, which is what `q_j(z)` will actually
+be once multi-parent nodes exist; building a sampler prematurely, before
+anything needs it, would be scope creep. Tests use i.i.d. Uniform(0,1)
+draws for `z_samples`, which is not an arbitrary test choice: for a
+single parent, `q_j(z)` is exactly the previously-fitted parent's own
+copula-scale marginal, which is uniform by construction (spec §12's
+inductive invariant) — so this is the *correct* `q_j` for the one-parent
+case the whole milestone is scoped to, not a simplification of it.
+
+**`sinkhorn/quadrature.c` and `sinkhorn/monte_carlo.c` (named in spec
+§22) were not created as separate files.** The generic Simpson-rule
+utility lives in `numerics/quadrature.c` (reusable outside Sinkhorn, and
+spec §22 lists `numerics/quadrature.c` too) and is called directly from
+`sinkhorn/normalize.c`; the "Monte Carlo" side is literally an unweighted
+average over caller-supplied samples with no separate logic worth its
+own file. Same reasoning as skipping `dcor_fast.c` in Milestone 3: no
+empty wrapper files.
+
+**Evaluating `c_j(u|z)` at an arbitrary, possibly out-of-sample, `(u,z)`
+recomputes `a(u)` and `b(z)` from their closed-form update rules against
+the fitted state, rather than interpolating a cached grid.** Both
+closed forms are already O(small) closures over the fitted vectors
+(`a(u)` needs the fitted `b` + `z_samples`; `b(z)` needs the fitted `a` +
+`u_nodes`/weights), so this is exact given the fitted discretization, not
+an approximation layered on top of it — and it costs no more than a
+handful of extra kernel evaluations per query. Confirmed in
+`test_conditional_integral_error_below_tolerance`: `∫c(u|z)du ≈ 1` holds
+to `1e-4` (via an independently re-run Simpson quadrature through the
+public API) at both a training-sample `z` and a fresh `z` never seen
+during fitting, because `b(z)`'s closed form only involves a
+deterministic quadrature over `u`, not a Monte Carlo term — the only
+place genuine Monte Carlo noise can appear is `a(u)`'s dependence on the
+finite `z_samples`, which is exactly why `test_marginal_preservation_
+error_below_tolerance` uses a much looser tolerance (`0.08`) when
+checking against a *fresh, independent* `z` sample, versus `1e-6` for
+the internal diagnostic that's self-consistent against the training
+`z_samples` by construction.
+
+**Convergence metric evaluated jointly at the current `(a,b)` after
+*both* half-steps, not as either half-step's own (trivially near-zero)
+residual.** Each Sinkhorn half-step exactly satisfies the constraint it
+was just solving for, given the *other* variable's previous value — so
+checking the conditional-integral constraint immediately after the
+`b`-update (using the `a` that produced it) would always read ~0 and
+tell you nothing about whether the joint fixed point has been reached.
+The implementation always recomputes both error terms from the latest
+`a` and `b` together, matching spec §11.2's metric literally.
