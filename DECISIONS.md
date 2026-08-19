@@ -123,3 +123,72 @@ bit-exact, and there's no ambiguity about what the diagonal should be by
 definition. This also sidesteps a degenerate edge case: a dimension with
 zero variance would otherwise make `dCor(U_j, U_j)` itself hit the 0/0
 guard and incorrectly report 0 instead of a self-correlation of 1.
+
+---
+
+## Milestone 4 — MST and persistent-topology ordering
+
+**Module split follows the spec's suggested layout (§22) closely, with
+five internal files under `topology/` plus one public orchestrator.**
+`union_find.{h,c}`, `mst.{h,c}`, `persistent_affinity.{h,c}`,
+`merge_tree.{h,c}`, and `ordering.{h,c}` are all private (headers live in
+`src/topology/`, not `include/hdcd/`) and are wired together by
+`topology.c`, which implements the single public header
+`include/hdcd/topology.h`. This mirrors how `dependence_matrix.c` sits
+on top of `dcor_exact.c` in Milestone 3 — tests only ever exercise the
+public `hdcd_compute_topology` surface, never the internal modules
+directly.
+
+**`S(C)` (component score) is computed via an O(1) closed-form recurrence
+during merge-tree construction, not by summing the materialized affinity
+matrix over member pairs.**
+At the moment two components `C1`, `C2` merge at MST edge weight `w`,
+*every* cross pair `(x in C1, y in C2)` has merge level `tau_xy = w`
+exactly — the same bottleneck-path fact `persistent_affinity.c` uses
+directly. So:
+```
+S(C1 ∪ C2) = S(C1) + S(C2) + 2 * |C1| * |C2| * (1 - w)
+```
+is exact, not an approximation, and lets the whole tree be scored in
+O(d) additional work with no member-list bookkeeping in `merge_tree.c` at
+all (`persistent_affinity.c` still explicitly materializes the full
+`tau`/affinity matrix, via its own member-list bookkeeping, purely as
+the public diagnostic surface spec §33 asks for — the two computations
+are independent and were cross-checked against each other during
+development on the hand-worked example below, not merely assumed to
+agree).
+
+**Important, spec-faithful, occasionally counterintuitive consequence:
+`S(C)` is an *extensive* (size-sensitive) sum over all ordered pairs in
+`C`, not a per-pair average.** A large supercluster formed by merging two
+individually looser clusters can outscore — and so be visited before — a
+smaller but individually tighter cluster, purely because it has more
+pairs to sum over. Confirmed this is correct (not a bug) by hand-tracing
+`examples/example_topology.c`'s actual MST edges through the recurrence
+independently in Python and matching the program's output exactly; the
+example now prints a note explaining this so the result doesn't look
+like a defect. This is what spec §6.3's literal formula
+(`S(C) = sum_j sum_{k != j} A_jk`, an unnormalized double sum) specifies;
+the spec separately defines a size-normalized per-variable quantity
+`S_j^(C)` but that is not what's used for component-vs-component
+ordering decisions.
+
+**Hand-worked correctness check.** Before writing `tests/test_topology.c`,
+a 4-node scenario was worked by hand: groups `{0,1}` (looser,
+`delta=0.3`) and `{2,3}` (tighter, `delta=0.05`), weak cross-group
+dependence (`delta=0.9`). MST edges `(2,3,0.05), (0,1,0.3), (0,2,0.9)`;
+scores `S({0,1})=1.4 < S({2,3})=1.9`; predicted final ordering
+`[2,3,0,1]` (tighter group first, both blocks contiguous). The test
+builds data with that same qualitative shape end-to-end (marginal fit →
+copula transform → dependence matrix → topology) and asserts exactly
+that structural outcome — this is the primary correctness anchor for the
+whole milestone, everything else (three-cluster contiguity,
+reproducibility, disconnected-graph failure) checks a narrower property.
+
+**Disconnected dependence graph is a hard failure
+(`HDCD_ERROR_NUMERICAL`), not a partial/best-effort tree.**
+If some variable's dCor is NaN (< 2 pairwise-complete rows, spec §5)
+against every other variable, no MST can span all `d` nodes. Per spec
+§24 ("never silently continue after NaN/Inf creation") and §36 rule 13,
+this fails clearly rather than returning a forest or silently dropping
+the disconnected variable from the ordering.
