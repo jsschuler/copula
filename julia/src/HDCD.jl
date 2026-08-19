@@ -111,6 +111,14 @@ struct HdcdLocalFitOptions
     theta_max_iterations::Csize_t
     theta_tol::Cdouble
     sinkhorn_options::HdcdSinkhornOptions
+    # Optional non-global, per-node learned roughness penalty (spec
+    # section 18; see DECISIONS.md). A NULL pointer / 0 size (the
+    # default_local_fit_options default below) disables this and uses
+    # `lambda_roughness` verbatim -- exactly as before these fields
+    # existed.
+    lambda_roughness_grid::Ptr{Cdouble}
+    lambda_roughness_grid_size::Csize_t
+    roughness_validation_fraction::Cdouble
 end
 
 function default_local_fit_options(; bernstein_degree, lambda_roughness, holdout_fraction, seed,
@@ -119,6 +127,7 @@ function default_local_fit_options(; bernstein_degree, lambda_roughness, holdout
         Csize_t(bernstein_degree), Cdouble(lambda_roughness), Cdouble(holdout_fraction),
         UInt64(seed), Csize_t(theta_max_iterations), Cdouble(theta_tol),
         HdcdSinkhornOptions(Csize_t(0), Cdouble(0), Cint(0)),
+        Ptr{Cdouble}(C_NULL), Csize_t(0), Cdouble(0),
     )
 end
 

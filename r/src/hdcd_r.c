@@ -304,7 +304,8 @@ SEXP hdcd_r_dag_edges(SEXP dag_ext, SEXP d) {
 SEXP hdcd_r_dag_fit(
     SEXP u, SEXP n, SEXP d, SEXP dag_ext,
     SEXP bernstein_degree, SEXP lambda_roughness, SEXP holdout_fraction, SEXP seed,
-    SEXP theta_max_iterations, SEXP theta_tol
+    SEXP theta_max_iterations, SEXP theta_tol,
+    SEXP lambda_roughness_grid, SEXP roughness_validation_fraction
 ) {
     hdcd_dag_t *dag = (hdcd_dag_t *)unwrap_pointer(dag_ext, "dag");
     size_t nn = (size_t)Rf_asInteger(n);
@@ -321,6 +322,16 @@ SEXP hdcd_r_dag_fit(
     options.theta_max_iterations = (size_t)Rf_asInteger(theta_max_iterations);
     options.theta_tol = Rf_asReal(theta_tol);
     /* sinkhorn_options left zeroed: library defaults. */
+
+    /* Optional non-global, per-node learned lambda_roughness (spec
+     * section 18): an empty grid (R's numeric(0), the default) disables
+     * this and uses `lambda_roughness` verbatim, exactly as before. */
+    size_t grid_size = (size_t)Rf_xlength(lambda_roughness_grid);
+    if (grid_size > 0) {
+        options.lambda_roughness_grid = REAL(lambda_roughness_grid);
+        options.lambda_roughness_grid_size = grid_size;
+        options.roughness_validation_fraction = Rf_asReal(roughness_validation_fraction);
+    }
 
     hdcd_dag_fit_t *fit = NULL;
     hdcd_status_t status = hdcd_dag_fit(up, mask, nn, dd, dag, &options, &fit);
@@ -402,6 +413,16 @@ SEXP hdcd_r_local_fit_parent_order(SEXP dag_fit_ext, SEXP node_1idx) {
     }
     UNPROTECT(1);
     return out;
+}
+
+SEXP hdcd_r_local_fit_selected_lambda_roughness(SEXP dag_fit_ext, SEXP node_1idx) {
+    hdcd_dag_fit_t *fit = (hdcd_dag_fit_t *)unwrap_pointer(dag_fit_ext, "dag_fit");
+    size_t j = (size_t)(Rf_asInteger(node_1idx) - 1);
+    const hdcd_local_fit_t *node = hdcd_dag_fit_node(fit, j);
+    if (node == NULL) {
+        Rf_error("invalid node index");
+    }
+    return Rf_ScalarReal(hdcd_local_fit_selected_lambda_roughness(node));
 }
 
 SEXP hdcd_r_local_fit_conditional_log_density(SEXP dag_fit_ext, SEXP node_1idx, SEXP u_vec, SEXP z_vec) {
@@ -544,7 +565,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"hdcd_r_dag_add_edge", (DL_FUNC)&hdcd_r_dag_add_edge, 3},
     {"hdcd_r_dag_clone", (DL_FUNC)&hdcd_r_dag_clone, 1},
     {"hdcd_r_dag_edges", (DL_FUNC)&hdcd_r_dag_edges, 2},
-    {"hdcd_r_dag_fit", (DL_FUNC)&hdcd_r_dag_fit, 10},
+    {"hdcd_r_dag_fit", (DL_FUNC)&hdcd_r_dag_fit, 12},
     {"hdcd_r_dag_fit_joint_log_density", (DL_FUNC)&hdcd_r_dag_fit_joint_log_density, 2},
     {"hdcd_r_dag_fit_holdout_scores", (DL_FUNC)&hdcd_r_dag_fit_holdout_scores, 2},
     {"hdcd_r_dag_fit_all_converged", (DL_FUNC)&hdcd_r_dag_fit_all_converged, 1},
@@ -552,6 +573,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"hdcd_r_dag_fit_kl_difference", (DL_FUNC)&hdcd_r_dag_fit_kl_difference, 2},
     {"hdcd_r_local_fit_n_parents", (DL_FUNC)&hdcd_r_local_fit_n_parents, 2},
     {"hdcd_r_local_fit_parent_order", (DL_FUNC)&hdcd_r_local_fit_parent_order, 2},
+    {"hdcd_r_local_fit_selected_lambda_roughness", (DL_FUNC)&hdcd_r_local_fit_selected_lambda_roughness, 2},
     {"hdcd_r_local_fit_conditional_log_density", (DL_FUNC)&hdcd_r_local_fit_conditional_log_density, 4},
     {"hdcd_r_run_annealing", (DL_FUNC)&hdcd_r_run_annealing, 18},
     {NULL, NULL, 0}

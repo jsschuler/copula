@@ -52,6 +52,46 @@ test_that("hdcd_fit_dag / hdcd_score_dag produce a meaningful KL comparison", {
   expect_gt(kl, 0)
 })
 
+test_that("lambda_roughness_grid selects a per-node lambda without changing default behavior", {
+  X <- make_chain_data(seed = 13)
+
+  fixed <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 3L, lambda_roughness = 0.15,
+                     annealing_iterations = 60L, seed = 3L)
+  # hdcd_node_lambda_roughness() must report the fixed value verbatim
+  # when lambda_roughness_grid was never supplied (the default).
+  expect_equal(hdcd_node_lambda_roughness(fixed, 2), 0.15)
+
+  auto <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 3L, lambda_roughness = 0.15,
+                    annealing_iterations = 60L, seed = 3L,
+                    lambda_roughness_grid = c(0.02, 0.05, 0.15, 0.3, 0.6),
+                    roughness_validation_fraction = 0.3)
+  expect_s3_class(auto, "hdcd_model")
+  # The reference DAG search (annealing) is untouched by the grid (spec
+  # section 18: selection happens outside the inner annealing loop), so
+  # the two fits should find the SAME reference structure here.
+  expect_equal(hdcd_dag(fixed), hdcd_dag(auto))
+
+  for (node in 2:3) {
+    if (length(hdcd_node_parents(auto, node)) > 0) {
+      selected <- hdcd_node_lambda_roughness(auto, node)
+      expect_true(selected %in% c(0.02, 0.05, 0.15, 0.3, 0.6))
+    }
+  }
+
+  # A candidate DAG fit via hdcd_fit_dag() also accepts (and by default
+  # reuses) the grid.
+  candidate <- hdcd_fit_dag(auto, hdcd_dag(auto))
+  expect_s3_class(candidate, "hdcd_dag_fit")
+  kl <- hdcd_score_dag(auto, candidate)
+  expect_true(is.numeric(kl))
+
+  # Root node: nothing to select.
+  root_nodes <- setdiff(1:3, hdcd_dag(auto)[, "child"])
+  if (length(root_nodes) > 0) {
+    expect_true(is.na(hdcd_node_lambda_roughness(auto, root_nodes[1])))
+  }
+})
+
 test_that("hdcd_sample raises a clear error, not silently returning garbage", {
   X <- make_chain_data(n = 100, seed = 13)
   model <- hdcd_fit(X, max_parents = 2L, annealing_iterations = 30L, seed = 3L)

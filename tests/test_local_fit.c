@@ -185,6 +185,150 @@ static void test_missing_data_row_counts(void) {
     HDCD_PASS("multi-parent usable-row count respects joint missingness");
 }
 
+static void test_roughness_grid_matches_fixed_when_singleton(void) {
+    /* A grid containing exactly the fixed lambda must reproduce the
+     * fixed-lambda fit exactly: the inner-validation search only
+     * SELECTS lambda_to_use, it never feeds any state into the final
+     * production fit, which is recomputed from the full train/holdout
+     * split either way. */
+    size_t n = 500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_gaussian_copula_data(n, 0.8, 42, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    hdcd_local_fit_options_t fixed_opt = default_options(7);
+    size_t parent = 0;
+    hdcd_local_fit_t *fixed_fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &fixed_opt, &fixed_fit) == HDCD_OK);
+
+    hdcd_local_fit_options_t grid_opt = fixed_opt;
+    double grid[1] = {0.15};
+    grid_opt.lambda_roughness_grid = grid;
+    grid_opt.lambda_roughness_grid_size = 1;
+    hdcd_local_fit_t *grid_fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &grid_opt, &grid_fit) == HDCD_OK);
+
+    HDCD_CHECK_NEAR(hdcd_local_fit_selected_lambda_roughness(grid_fit), 0.15, 1e-15);
+    HDCD_CHECK_NEAR(hdcd_local_fit_holdout_score(grid_fit), hdcd_local_fit_holdout_score(fixed_fit), 1e-9);
+    HDCD_CHECK_NEAR(hdcd_local_fit_roughness_penalty(grid_fit), hdcd_local_fit_roughness_penalty(fixed_fit), 1e-9);
+
+    hdcd_local_fit_free(fixed_fit);
+    hdcd_local_fit_free(grid_fit);
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("a singleton roughness grid reproduces the fixed-lambda fit exactly");
+}
+
+static void test_roughness_grid_picks_a_lighter_penalty(void) {
+    /* Deliberately mis-set the "default" to a much-too-strong penalty
+     * for a strong (rho=0.85) Gaussian dependency, then give the grid a
+     * range spanning that bad default down to much lighter values. The
+     * grid should both select something lighter than the bad default
+     * and score at least as well out of sample -- exactly the
+     * over-smoothing failure mode notebooks/vine_copula_recovery.Rmd
+     * diagnosed for a single global lambda_roughness. */
+    size_t n = 800, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_gaussian_copula_data(n, 0.85, 123, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    double bad_lambda = 5.0;
+    hdcd_local_fit_options_t bad_fixed = default_options(21);
+    bad_fixed.lambda_roughness = bad_lambda;
+    size_t parent = 0;
+    hdcd_local_fit_t *bad_fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_fixed, &bad_fit) == HDCD_OK);
+
+    hdcd_local_fit_options_t grid_opt = default_options(21);
+    double grid[5] = {5.0, 1.0, 0.3, 0.1, 0.03};
+    grid_opt.lambda_roughness_grid = grid;
+    grid_opt.lambda_roughness_grid_size = 5;
+    grid_opt.roughness_validation_fraction = 0.3;
+    hdcd_local_fit_t *grid_fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &grid_opt, &grid_fit) == HDCD_OK);
+
+    double selected = hdcd_local_fit_selected_lambda_roughness(grid_fit);
+    int is_grid_member = 0;
+    for (size_t i = 0; i < 5; i++) {
+        if (selected == grid[i]) is_grid_member = 1;
+    }
+    HDCD_CHECK(is_grid_member);
+    HDCD_CHECK(selected < bad_lambda);
+    HDCD_CHECK(hdcd_local_fit_holdout_score(grid_fit) >= hdcd_local_fit_holdout_score(bad_fit));
+
+    hdcd_local_fit_free(bad_fit);
+    hdcd_local_fit_free(grid_fit);
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("per-node roughness grid selects a lighter penalty than a badly-fixed default and scores at least as well");
+}
+
+static void test_root_node_selected_lambda_is_nan(void) {
+    size_t n = 20, d = 2;
+    double u[40];
+    uint8_t mask[40];
+    for (size_t i = 0; i < 40; i++) { u[i] = 0.5; mask[i] = 1; }
+
+    hdcd_local_fit_options_t opt = default_options(1);
+    double grid[2] = {0.5, 0.1};
+    opt.lambda_roughness_grid = grid;
+    opt.lambda_roughness_grid_size = 2;
+    hdcd_local_fit_t *fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 0, NULL, 0, &opt, &fit) == HDCD_OK);
+    HDCD_CHECK(isnan(hdcd_local_fit_selected_lambda_roughness(fit)));
+
+    hdcd_local_fit_free(fit);
+    HDCD_PASS("root node's selected lambda_roughness is NAN (nothing to select)");
+}
+
+static void test_roughness_grid_invalid_arguments(void) {
+    size_t n = 500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_gaussian_copula_data(n, 0.5, 55, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    size_t parent = 0;
+    hdcd_local_fit_t *fit = NULL;
+
+    hdcd_local_fit_options_t bad_grid_value = default_options(1);
+    double grid_with_zero[2] = {0.2, 0.0};
+    bad_grid_value.lambda_roughness_grid = grid_with_zero;
+    bad_grid_value.lambda_roughness_grid_size = 2;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_grid_value, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    hdcd_local_fit_options_t bad_fraction = default_options(1);
+    double grid_ok[2] = {0.2, 0.05};
+    bad_fraction.lambda_roughness_grid = grid_ok;
+    bad_fraction.lambda_roughness_grid_size = 2;
+    bad_fraction.roughness_validation_fraction = 1.5;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_fraction, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    /* Too little data left for the inner split once holdout_fraction and
+     * roughness_validation_fraction are both applied. */
+    hdcd_local_fit_options_t tiny_data = default_options(1);
+    tiny_data.lambda_roughness_grid = grid_ok;
+    tiny_data.lambda_roughness_grid_size = 2;
+    tiny_data.holdout_fraction = 0.5;
+    tiny_data.roughness_validation_fraction = 0.999;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &tiny_data, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("roughness grid rejects non-positive candidates, an out-of-range validation fraction, and insufficient data");
+}
+
 static void test_invalid_arguments(void) {
     size_t n = 50, d = 2;
     double u[100];
@@ -225,6 +369,10 @@ int main(void) {
     test_dependent_data_beats_independence_baseline();
     test_independent_data_stays_near_baseline();
     test_missing_data_row_counts();
+    test_roughness_grid_matches_fixed_when_singleton();
+    test_roughness_grid_picks_a_lighter_penalty();
+    test_root_node_selected_lambda_is_nan();
+    test_roughness_grid_invalid_arguments();
     test_invalid_arguments();
     printf("All local_fit tests passed.\n");
     return 0;

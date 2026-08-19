@@ -144,6 +144,14 @@ class HdcdLocalFitOptions(Structure):
         ("theta_max_iterations", c_size_t),
         ("theta_tol", c_double),
         ("sinkhorn_options", HdcdSinkhornOptions),
+        # Optional non-global, per-node learned roughness penalty (spec
+        # section 18; see DECISIONS.md). NULL/0-size (the ctypes default:
+        # a null POINTER and a zeroed c_size_t) disables this and uses
+        # `lambda_roughness` verbatim -- exactly as before this field
+        # existed.
+        ("lambda_roughness_grid", POINTER(c_double)),
+        ("lambda_roughness_grid_size", c_size_t),
+        ("roughness_validation_fraction", c_double),
     ]
 
 

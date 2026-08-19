@@ -52,6 +52,7 @@ struct hdcd_local_fit {
     size_t n_holdout;
     double holdout_score;
     double roughness_penalty;
+    double selected_lambda_roughness; /* NAN for a root node */
     int theta_converged;
 };
 
@@ -176,6 +177,157 @@ static int fit_theta_edge(
     return converged;
 }
 
+typedef struct {
+    double *theta;                     /* owned; n_parents*(m+1)*(m+1) */
+    kernel_userdata_t *kernel_userdata; /* owned; ->theta aliases the field above */
+    hdcd_sinkhorn_t *sinkhorn;         /* owned */
+    double score;                       /* mean held-out log-density on the score rows */
+    double roughness_penalty;
+    int theta_converged;
+} local_fit_candidate_t;
+
+static void local_fit_candidate_release(local_fit_candidate_t *c) {
+    if (c == NULL) {
+        return;
+    }
+    hdcd_sinkhorn_free(c->sinkhorn); /* must be freed before kernel_userdata, which it references */
+    free(c->kernel_userdata);
+    free(c->theta);
+    c->sinkhorn = NULL;
+    c->kernel_userdata = NULL;
+    c->theta = NULL;
+}
+
+/*
+ * Fits every parent edge's Theta (gradient ascent) plus the Sinkhorn
+ * normalization on `train_rows`, then scores the resulting c_j on
+ * `score_rows` -- the shared core of hdcd_local_fit_node's steps 2-5,
+ * parametrized so it can serve both the normal single-lambda fit (train
+ * = the outer TRAIN split, score = the outer HOLDOUT split) and one
+ * roughness-grid candidate's inner-validation fit (train/score are an
+ * inner split of the outer TRAIN rows only -- the outer holdout is
+ * never touched by grid search).
+ *
+ * HDCD_OK on success (the candidate may still be non-convergent; see
+ * out->theta_converged). Any other status means *out was never
+ * populated (nothing to release).
+ */
+static hdcd_status_t fit_and_score(
+    const double *u, size_t n, size_t child, const size_t *parents, size_t n_parents,
+    const size_t *train_rows, size_t n_train_rows,
+    const size_t *score_rows, size_t n_score_rows,
+    size_t m, double lambda_r,
+    size_t theta_max_iter, double theta_tol,
+    const hdcd_sinkhorn_options_t *sinkhorn_options,
+    local_fit_candidate_t *out
+) {
+    size_t dim = m + 1;
+
+    double *m_stat = (double *)calloc(n_parents * dim * dim, sizeof(double));
+    double *z_row = (double *)malloc(n_parents * sizeof(double));
+    double *z_samples = (double *)malloc((size_t)n_train_rows * n_parents * sizeof(double));
+    double *grad_scratch = (double *)malloc(dim * dim * sizeof(double));
+    double *theta = (double *)calloc(n_parents * dim * dim, sizeof(double));
+    if (m_stat == NULL || z_row == NULL || z_samples == NULL || grad_scratch == NULL || theta == NULL) {
+        free(m_stat); free(z_row); free(z_samples); free(grad_scratch); free(theta);
+        return HDCD_ERROR_ALLOCATION;
+    }
+
+    /* Sufficient statistics M_jk, MEAN (not sum) over train_rows -- see
+     * the comment on the analogous loop below for why. */
+    for (size_t i = 0; i < n_train_rows; i++) {
+        size_t row = train_rows[i];
+        double u_val = u[child * n + row];
+        for (size_t k = 0; k < n_parents; k++) {
+            double z_val = u[parents[k] * n + row];
+            z_samples[i * n_parents + k] = z_val;
+            hdcd_bernstein_tensor_gradient(u_val, z_val, m, grad_scratch);
+            double *m_k = &m_stat[k * dim * dim];
+            for (size_t e = 0; e < dim * dim; e++) {
+                m_k[e] += grad_scratch[e];
+            }
+        }
+    }
+    for (size_t e = 0; e < n_parents * dim * dim; e++) {
+        m_stat[e] /= (double)n_train_rows;
+    }
+    free(grad_scratch);
+
+    int all_theta_converged = 1;
+    for (size_t k = 0; k < n_parents; k++) {
+        int converged = fit_theta_edge(&theta[k * dim * dim], &m_stat[k * dim * dim], m, lambda_r, theta_max_iter, theta_tol);
+        if (!converged) {
+            all_theta_converged = 0;
+        }
+    }
+    free(m_stat);
+
+    double roughness_penalty = 0.0;
+    for (size_t k = 0; k < n_parents; k++) {
+        double r;
+        hdcd_bernstein_roughness_penalty(&theta[k * dim * dim], m, &r);
+        roughness_penalty += r;
+    }
+
+    kernel_userdata_t *kd = (kernel_userdata_t *)malloc(sizeof(kernel_userdata_t));
+    if (kd == NULL) {
+        free(z_row);
+        free(z_samples);
+        free(theta);
+        return HDCD_ERROR_ALLOCATION;
+    }
+    kd->m = m;
+    kd->n_parents = n_parents;
+    kd->theta = theta;
+
+    hdcd_sinkhorn_t *sk = NULL;
+    hdcd_status_t sinkhorn_status = hdcd_sinkhorn_fit(
+        raw_kernel_callback, kd, z_samples, n_train_rows, n_parents, sinkhorn_options, &sk
+    );
+    free(z_samples);
+    if (sk == NULL) {
+        free(z_row);
+        free(kd);
+        free(theta);
+        return sinkhorn_status;
+    }
+
+    double sum_loglik = 0.0;
+    hdcd_status_t score_status = HDCD_OK;
+    for (size_t i = 0; i < n_score_rows && score_status == HDCD_OK; i++) {
+        size_t row = score_rows[i];
+        double u_val = u[child * n + row];
+        for (size_t k = 0; k < n_parents; k++) {
+            z_row[k] = u[parents[k] * n + row];
+        }
+        double c;
+        score_status = hdcd_sinkhorn_conditional_density(sk, u_val, z_row, n_parents, &c);
+        if (score_status == HDCD_OK) {
+            if (!(c > 0.0) || isnan(c)) {
+                score_status = HDCD_ERROR_NUMERICAL;
+            } else {
+                sum_loglik += log(c);
+            }
+        }
+    }
+    free(z_row);
+
+    if (score_status != HDCD_OK) {
+        hdcd_sinkhorn_free(sk);
+        free(kd);
+        free(theta);
+        return score_status;
+    }
+
+    out->theta = theta;
+    out->kernel_userdata = kd;
+    out->sinkhorn = sk;
+    out->score = sum_loglik / (double)n_score_rows;
+    out->roughness_penalty = roughness_penalty;
+    out->theta_converged = all_theta_converged;
+    return HDCD_OK;
+}
+
 hdcd_status_t hdcd_local_fit_node(
     const double *u, const uint8_t *mask, size_t n, size_t d,
     size_t child, const size_t *parents, size_t n_parents,
@@ -204,8 +356,24 @@ hdcd_status_t hdcd_local_fit_node(
     if (!(options->holdout_fraction > 0.0) || !(options->holdout_fraction < 1.0)) {
         return HDCD_ERROR_INVALID_ARGUMENT;
     }
-    if (n_parents > 0 && !(options->lambda_roughness > 0.0)) {
-        return HDCD_ERROR_INVALID_ARGUMENT;
+    int grid_enabled = (options->lambda_roughness_grid != NULL && options->lambda_roughness_grid_size > 0);
+    double roughness_validation_fraction = 0.3;
+    if (n_parents > 0) {
+        if (grid_enabled) {
+            for (size_t i = 0; i < options->lambda_roughness_grid_size; i++) {
+                if (!(options->lambda_roughness_grid[i] > 0.0)) {
+                    return HDCD_ERROR_INVALID_ARGUMENT;
+                }
+            }
+            if (options->roughness_validation_fraction > 0.0) {
+                roughness_validation_fraction = options->roughness_validation_fraction;
+            }
+            if (!(roughness_validation_fraction > 0.0) || !(roughness_validation_fraction < 1.0)) {
+                return HDCD_ERROR_INVALID_ARGUMENT;
+            }
+        } else if (!(options->lambda_roughness > 0.0)) {
+            return HDCD_ERROR_INVALID_ARGUMENT;
+        }
     }
     *out = NULL;
 
@@ -263,6 +431,7 @@ hdcd_status_t hdcd_local_fit_node(
         fit->n_holdout = n_usable;
         fit->holdout_score = 0.0;
         fit->roughness_penalty = 0.0;
+        fit->selected_lambda_roughness = NAN;
         fit->theta_converged = 1;
         *out = fit;
         return HDCD_OK;
@@ -283,145 +452,110 @@ hdcd_status_t hdcd_local_fit_node(
     fit->m = options->bernstein_degree;
     fit->n_train = n_train;
     fit->n_holdout = n_holdout;
-    size_t dim = fit->m + 1;
 
-    fit->theta = (double *)calloc(n_parents * dim * dim, sizeof(double));
-    double *m_stat = (double *)calloc(n_parents * dim * dim, sizeof(double));
-    double *z_row = (double *)malloc(n_parents * sizeof(double));
-    double *z_samples = (double *)malloc((size_t)n_train * n_parents * sizeof(double));
-    double *grad_scratch = (double *)malloc(dim * dim * sizeof(double));
-
-    if (fit->theta == NULL || m_stat == NULL || z_row == NULL || z_samples == NULL || grad_scratch == NULL) {
-        free(usable_rows);
-        free(m_stat);
-        free(z_row);
-        free(z_samples);
-        free(grad_scratch);
-        hdcd_local_fit_free(fit);
-        return HDCD_ERROR_ALLOCATION;
-    }
-
-    /* Step 2 (data prep): sufficient statistics M_jk and Sinkhorn z_samples from the TRAIN rows.
-     * M_jk is the MEAN (not sum) of the per-row outer products: averaging
-     * keeps lambda_roughness's effective strength independent of
-     * n_train. A raw sum would make the "reward" term grow linearly
-     * with dataset size while the penalty term does not, so the same
-     * lambda_roughness would regularize less and less as n_train grows
-     * -- discovered via divergence (Theta and Sinkhorn both failing to
-     * converge, with an exploding roughness penalty) while testing
-     * against real dependent data; see DECISIONS.md. */
-    for (size_t i = 0; i < n_train; i++) {
-        size_t row = usable_rows[i];
-        double u_val = u[child * n + row];
-        for (size_t k = 0; k < n_parents; k++) {
-            double z_val = u[parents[k] * n + row];
-            z_row[k] = z_val;
-            z_samples[i * n_parents + k] = z_val;
-            hdcd_bernstein_tensor_gradient(u_val, z_val, fit->m, grad_scratch);
-            double *m_k = &m_stat[k * dim * dim];
-            for (size_t e = 0; e < dim * dim; e++) {
-                m_k[e] += grad_scratch[e];
-            }
-        }
-    }
-    for (size_t e = 0; e < n_parents * dim * dim; e++) {
-        m_stat[e] /= (double)n_train;
-    }
-    free(grad_scratch);
-
-    /* Step 3: fit each parent's Theta via gradient ascent (spec section 28 step 3). */
     size_t theta_max_iter = (options->theta_max_iterations != 0)
                              ? options->theta_max_iterations : HDCD_LOCAL_FIT_DEFAULT_THETA_MAX_ITER;
     double theta_tol = (options->theta_tol > 0.0) ? options->theta_tol : HDCD_LOCAL_FIT_DEFAULT_THETA_TOL;
 
-    int all_theta_converged = 1;
-    for (size_t k = 0; k < n_parents; k++) {
-        int converged = fit_theta_edge(
-            &fit->theta[k * dim * dim], &m_stat[k * dim * dim], fit->m,
-            options->lambda_roughness, theta_max_iter, theta_tol
-        );
-        if (!converged) {
-            all_theta_converged = 0;
+    double lambda_to_use;
+    if (!grid_enabled) {
+        lambda_to_use = options->lambda_roughness;
+    } else {
+        /* Select lambda_roughness PER NODE via a small validation grid
+         * (spec section 18), using an INNER split of the outer TRAIN
+         * rows only -- the outer holdout (used for hdcd_dag_fit_kl_estimate
+         * and, if this options struct reaches hdcd_run_annealing, for the
+         * annealing objective) is never touched here, so it stays an
+         * unbiased score for whatever lambda ends up selected. */
+        size_t n_inner_val = (size_t)((double)n_train * roughness_validation_fraction);
+        size_t n_inner_train = n_train - n_inner_val;
+        if (n_inner_train < 2 || n_inner_val < 1) {
+            free(usable_rows);
+            hdcd_local_fit_free(fit);
+            return HDCD_ERROR_INVALID_ARGUMENT;
         }
-    }
-    fit->theta_converged = all_theta_converged;
-    free(m_stat);
 
-    fit->roughness_penalty = 0.0;
-    for (size_t k = 0; k < n_parents; k++) {
-        double r;
-        hdcd_bernstein_roughness_penalty(&fit->theta[k * dim * dim], fit->m, &r);
-        fit->roughness_penalty += r;
-    }
+        size_t *inner_rows = (size_t *)malloc(n_train * sizeof(size_t));
+        if (inner_rows == NULL) {
+            free(usable_rows);
+            hdcd_local_fit_free(fit);
+            return HDCD_ERROR_ALLOCATION;
+        }
+        memcpy(inner_rows, usable_rows, n_train * sizeof(size_t));
+        hdcd_rng_t inner_rng;
+        hdcd_rng_seed(&inner_rng, options->seed ^ 0xD1B54A32D192ED03ULL);
+        hdcd_rng_shuffle_indices(&inner_rng, inner_rows, n_train);
 
-    /* Step 4: Sinkhorn-normalize (spec section 28 step 4), using the
-     * TRAIN rows' own parent values as the Monte Carlo z-samples (spec
-     * section 11.2; see DECISIONS.md).
-     *
-     * `fit->kernel_userdata` is owned by `fit`, not freed at the end of
-     * this function: hdcd_sinkhorn_t stores the raw kernel callback's
-     * userdata pointer internally and calls back through it on every
-     * future hdcd_sinkhorn_conditional_density() evaluation, not only
-     * during this fit -- freeing it here would leave `fit->sinkhorn`
-     * holding a dangling pointer for the rest of `fit`'s lifetime. */
-    fit->kernel_userdata = (kernel_userdata_t *)malloc(sizeof(kernel_userdata_t));
-    if (fit->kernel_userdata == NULL) {
-        free(usable_rows);
-        free(z_row);
-        free(z_samples);
-        hdcd_local_fit_free(fit);
-        return HDCD_ERROR_ALLOCATION;
+        double best_score = -INFINITY;
+        double best_lambda = options->lambda_roughness_grid[0];
+        int any_ok = 0;
+        for (size_t gi = 0; gi < options->lambda_roughness_grid_size; gi++) {
+            local_fit_candidate_t cand;
+            hdcd_status_t cstatus = fit_and_score(
+                u, n, child, parents, n_parents,
+                inner_rows, n_inner_train,
+                inner_rows + n_inner_train, n_inner_val,
+                fit->m, options->lambda_roughness_grid[gi], theta_max_iter, theta_tol,
+                &options->sinkhorn_options, &cand
+            );
+            if (cstatus == HDCD_ERROR_ALLOCATION) {
+                free(inner_rows);
+                free(usable_rows);
+                hdcd_local_fit_free(fit);
+                return HDCD_ERROR_ALLOCATION;
+            }
+            if (cstatus == HDCD_OK) {
+                any_ok = 1;
+                if (cand.score > best_score) {
+                    best_score = cand.score;
+                    best_lambda = options->lambda_roughness_grid[gi];
+                }
+                local_fit_candidate_release(&cand);
+            }
+            /* cstatus == HDCD_ERROR_NUMERICAL / HDCD_ERROR_INVALID_ARGUMENT:
+             * this candidate lambda produced a degenerate fit (exactly
+             * the overfitting failure mode a too-small lambda can hit --
+             * see notebooks/vine_copula_recovery.Rmd's roughness
+             * sensitivity check). Skip it, nothing was allocated to
+             * release, keep searching the rest of the grid. */
+        }
+        free(inner_rows);
+        if (!any_ok) {
+            free(usable_rows);
+            hdcd_local_fit_free(fit);
+            return HDCD_ERROR_NUMERICAL;
+        }
+        lambda_to_use = best_lambda;
     }
-    fit->kernel_userdata->m = fit->m;
-    fit->kernel_userdata->n_parents = n_parents;
-    fit->kernel_userdata->theta = fit->theta;
+    fit->selected_lambda_roughness = lambda_to_use;
 
-    hdcd_sinkhorn_t *sk = NULL;
-    hdcd_status_t sinkhorn_status = hdcd_sinkhorn_fit(
-        raw_kernel_callback, fit->kernel_userdata, z_samples, n_train, n_parents,
-        &options->sinkhorn_options, &sk
+    /* Final fit: Theta + Sinkhorn on the FULL train rows at the selected
+     * lambda, scored on the (untouched) outer holdout -- spec section 28
+     * steps 3-4 and section 16's held-out score, exactly as if the grid
+     * had never run. */
+    local_fit_candidate_t production;
+    hdcd_status_t status = fit_and_score(
+        u, n, child, parents, n_parents,
+        usable_rows, n_train,
+        usable_rows + n_train, n_holdout,
+        fit->m, lambda_to_use, theta_max_iter, theta_tol,
+        &options->sinkhorn_options, &production
     );
-    free(z_samples);
+    free(usable_rows);
 
-    if (sk == NULL) {
+    if (status != HDCD_OK) {
         /* Hard failure (invalid arguments, numerical error) rather than
          * mere non-convergence: nothing usable to keep. */
-        free(usable_rows);
-        free(z_row);
         hdcd_local_fit_free(fit);
-        return sinkhorn_status;
-    }
-    fit->sinkhorn = sk;
-
-    /* Step 5: score on the HOLDOUT rows only (spec section 16). */
-    double sum_loglik = 0.0;
-    hdcd_status_t score_status = HDCD_OK;
-    for (size_t i = 0; i < n_holdout && score_status == HDCD_OK; i++) {
-        size_t row = usable_rows[n_train + i];
-        double u_val = u[child * n + row];
-        for (size_t k = 0; k < n_parents; k++) {
-            z_row[k] = u[parents[k] * n + row];
-        }
-        double c;
-        score_status = hdcd_sinkhorn_conditional_density(sk, u_val, z_row, n_parents, &c);
-        if (score_status == HDCD_OK) {
-            if (!(c > 0.0) || isnan(c)) {
-                score_status = HDCD_ERROR_NUMERICAL;
-            } else {
-                sum_loglik += log(c);
-            }
-        }
+        return status;
     }
 
-    free(usable_rows);
-    free(z_row);
-
-    if (score_status != HDCD_OK) {
-        hdcd_local_fit_free(fit);
-        return score_status;
-    }
-
-    fit->holdout_score = sum_loglik / (double)n_holdout;
+    fit->theta = production.theta;
+    fit->kernel_userdata = production.kernel_userdata;
+    fit->sinkhorn = production.sinkhorn;
+    fit->holdout_score = production.score;
+    fit->roughness_penalty = production.roughness_penalty;
+    fit->theta_converged = production.theta_converged;
 
     *out = fit;
 
@@ -468,6 +602,10 @@ double hdcd_local_fit_holdout_score(const hdcd_local_fit_t *fit) {
 
 double hdcd_local_fit_roughness_penalty(const hdcd_local_fit_t *fit) {
     return (fit != NULL) ? fit->roughness_penalty : NAN;
+}
+
+double hdcd_local_fit_selected_lambda_roughness(const hdcd_local_fit_t *fit) {
+    return (fit != NULL) ? fit->selected_lambda_roughness : NAN;
 }
 
 int hdcd_local_fit_theta_converged(const hdcd_local_fit_t *fit) {

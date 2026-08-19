@@ -456,7 +456,7 @@ random scatter — it is a real, systematic shape mismatch, worth
 understanding rather than averaging away into the single headline number
 above.
 
-## Known limitation: sharp tail-dependence corners are over-smoothed
+## Known limitation: sharp tail-dependence corners are under-fit
 
 Look closely at the row-1 and row-6 panels (Clayton) at $z=0.1$, and the
 row-7 panel (Gumbel) at $z=0.9$, in the density grid above: the **true**
@@ -467,55 +467,95 @@ upper-tail dependence does the same as $u, z \to 1$), while `hdcd`'s
 tracks the true curve well everywhere else. This is the actual thing that
 prompted a closer look at "densities that don't line up."
 
-Two candidate explanations, checked directly rather than guessed at,
-using the same edge (1->2, Clayton, $z=0.1$) that shows the mismatch
-most clearly:
+The first hypothesis was that a single, hand-picked, *global*
+`lambda_roughness = 0.15` — applied identically to all nine edges — was
+over-smoothing specifically these sharply-peaked edges, and that a
+lighter, per-edge penalty would fit them better. `hdcd` now supports
+exactly that as an option (`lambda_roughness_grid`, see `DECISIONS.md`):
+a small validation grid, searched independently per node via an *inner*
+train/validation split that never touches the outer holdout, entirely
+outside the annealing search (spec section 18). Applying it directly
+tests the hypothesis rather than just asserting it.
 
-1. **Is `bernstein_degree = 4` just too coarse a basis to represent a
-   sharp corner?** Refitting the *true* DAG at a higher degree while
-   holding `lambda_roughness` fixed at this notebook's value of 0.15
-   (first two rows of the table below) does **not** help — correlation
-   is essentially unchanged (if anything slightly worse) at degree 8.
-   More basis flexibility alone is not the fix.
-2. **Is the roughness penalty over-smoothing it?** Holding
-   `bernstein_degree` fixed and sweeping `lambda_roughness` down instead
-   tells a different story: correlation improves markedly going from
-   0.15 down to 0.05 at both degrees. Pushed further to 0.01, degree 8
-   keeps improving (correlation rises further, peak height climbs much
-   closer to the true peak), while degree 4 instead collapses into
-   visible overfitting (correlation craters, peak height massively
-   overshoots the true value) — the classic bias/variance crossover, at
-   a point that depends on the basis size.
+```{r roughness-grid-fit}
+roughness_grid <- c(0.02, 0.05, 0.1, 0.15, 0.3, 0.6, 1.0)
+t0 <- tic()
+auto_fit <- hdcd:::.dag_fit_c(model$U, n, d, true_fit$dag, bernstein_degree, lambda_roughness,
+                               holdout_fraction, local_seed,
+                               lambda_roughness_grid = roughness_grid,
+                               roughness_validation_fraction = 0.3)
+auto_fit_time <- toc(t0, "Per-node auto lambda_roughness fit_dag() (diagnostic only)")
 
-```{r roughness-sensitivity}
-sensitivity <- expand.grid(lambda_roughness = c(0.15, 0.05, 0.01), bernstein_degree = c(4L, 8L))
-sensitivity <- do.call(rbind, lapply(seq_len(nrow(sensitivity)), function(i) {
-  lr <- sensitivity$lambda_roughness[i]
-  deg <- sensitivity$bernstein_degree[i]
-  fit <- hdcd:::.dag_fit_c(model$U, n, d, true_fit$dag, deg, lr, holdout_fraction, local_seed)
-  fitted <- exp(hdcd:::.local_fit_conditional_log_density(fit, 2L, u_grid, 0.1))
-  true_dens <- dCopula(cbind(rep(0.1, length(u_grid)), u_grid), families[[1]])
-  data.frame(lambda_roughness = lr, bernstein_degree = deg,
-             correlation = round(cor(fitted, true_dens), 3),
-             peak_fitted = round(max(fitted), 2), peak_true = round(max(true_dens), 2))
+selected <- do.call(rbind, lapply(seq_len(d - 1), function(i) {
+  node <- i + 1L
+  data.frame(
+    edge = sprintf("%d->%d", i, i + 1), family = family_names[i],
+    selected_lambda = hdcd:::.local_fit_selected_lambda_roughness(auto_fit, node),
+    holdout_score_auto = round(hdcd:::.dag_fit_holdout_scores(auto_fit, d)[node], 4),
+    holdout_score_fixed_0.15 = round(hdcd:::.dag_fit_holdout_scores(true_fit$dag_fit, d)[node], 4)
+  )
 }))
-kable(sensitivity, caption = "Edge 1->2 (Clayton, tau=0.6), z=0.1: fitted-vs-true agreement as lambda_roughness varies")
+kable(selected, caption = sprintf(
+  "Per-node lambda_roughness selected from {%s} by inner-validation, vs. this notebook's fixed 0.15",
+  paste(roughness_grid, collapse = ", ")
+))
+cat(sprintf("Delta_KL(fixed@0.15 vs. auto-selected) = %.4f\n",
+            hdcd:::.dag_fit_kl_difference(true_fit$dag_fit, auto_fit)))
 ```
 
-**Conclusion:** the mismatch is a genuine, explainable bias-variance
-tradeoff, not a bug. This notebook fixes `lambda_roughness = 0.15` as one
-*global* smoothing strength applied identically to every edge, chosen (see
-`DECISIONS.md`) as a reasonable general-purpose default. That single value
-is a good match for the smooth, no-tail-dependence edges (Frank, Gaussian:
-correlation $\geq 0.97$) but is measurably too strong for the sharply
-peaked Archimedean tail-dependence edges (Clayton, Gumbel), which would
-fit visibly better under a lighter penalty — at the cost of more variance
-if pushed too far (lambda=0.001 above shows the overfit side of that same
-tradeoff). Per-edge roughness selection (e.g. via each node's own
-held-out score) rather than one fixed value across the whole DAG would be
-the natural fix; that is a genuine follow-up, not something to route
-around by re-tuning this notebook's single global default until the
-Clayton/Gumbel edges happen to look better.
+**The hypothesis does not survive contact with the data.** Every edge —
+Clayton and Gumbel included — selects a lambda at or above this
+notebook's original 0.15, not below it; several land higher (0.3). A
+finer, continuous sweep (fixed `lambda_roughness`, no grid search)
+confirms this is a genuine interior optimum, not an artifact of the
+grid's spacing:
+
+```{r roughness-fine-sweep, fig.height=3.2}
+fine_lambdas <- c(0.01, 0.02, 0.05, 0.1, 0.15, 0.3, 0.6, 1.0, 2.0)
+fine_sweep <- do.call(rbind, lapply(c(edge1 = 2L, edge7 = 8L, edge3 = 4L), function(node) {
+  do.call(rbind, lapply(fine_lambdas, function(lr) {
+    fit <- hdcd:::.dag_fit_c(model$U, n, d, true_fit$dag, bernstein_degree, lr, holdout_fraction, local_seed)
+    data.frame(edge = c(`2` = "1->2 Clayton(3.0)", `8` = "7->8 Gumbel(3.0)", `4` = "3->4 Frank(5.0)")[[as.character(node)]],
+               lambda_roughness = lr,
+               holdout_score = hdcd:::.dag_fit_holdout_scores(fit, d)[node])
+  }))
+}))
+ggplot(fine_sweep, aes(lambda_roughness, holdout_score)) +
+  geom_line() + geom_point() +
+  geom_vline(xintercept = 0.15, linetype = "dashed", color = "firebrick") +
+  scale_x_log10() +
+  facet_wrap(~edge, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Held-out score vs. lambda_roughness (log scale), fixed bernstein_degree",
+       subtitle = "dashed line = this notebook's fixed 0.15",
+       x = "lambda_roughness (log scale)", y = "held-out log-density score")
+```
+
+The same interior-optimum shape shows up for the Clayton edge, the
+Gumbel edge, and even the smooth Frank edge (which has no corner at
+all) — none of them want much lighter regularization than 0.15, and all
+of them clearly punish going much lighter. `Delta_KL` in the table above
+is slightly *positive* for the auto-selected fit relative to the fixed
+default: per-node selection pays a real cost here (each candidate is fit
+on a smaller *inner*-train subset, which is why it exists to begin with
+— see `DECISIONS.md`), and on this dataset that cost isn't repaid,
+because 0.15 was already close to optimal everywhere it was tested.
+
+**Revised conclusion.** The original diagnosis — eyeballing the fitted
+curve against the true curve and concluding "a lighter penalty would fit
+this corner better" — was measuring agreement with a density that is only
+knowable here because this is a synthetic exercise with ground truth.
+*Held-out log-likelihood*, the criterion `hdcd` (and any real, non-
+synthetic application) actually optimizes, disagrees: it says 0.15 is
+already a good choice for these edges, lighter regularization measurably
+overfits, and the visual corner-flattening is not primarily a smoothing
+problem. What's left is more consistent with a basis-expressivity
+limit — a degree-4 centered Bernstein tensor is a smooth, globally
+bounded polynomial surface, and no amount of retuning `lambda_roughness`
+lets a bounded polynomial reproduce an unbounded corner singularity. This
+is a more honest, if less tidy, takeaway than the first pass reached, and
+exactly what building the feature properly (rather than assuming the fix)
+was for.
 
 # Summary
 
@@ -550,10 +590,20 @@ cat(sprintf("Mean fitted-vs-true conditional density correlation: %.3f\n",
   Bernstein/Sinkhorn machinery (Milestones 5-6) is doing its job.
 - The clearest weak spot: on edges with strong Archimedean tail
   dependence (Clayton, Gumbel), the fitted density visibly under-shoots
-  the true density's sharp corner spike. Traced to this notebook's single
-  *global* `lambda_roughness = 0.15` over-smoothing those edges
-  specifically (verified: a lighter penalty recovers the peak; more
-  `bernstein_degree` alone does not) — a real, explainable limitation of
-  using one fixed smoothing strength across a DAG with heterogeneous edge
-  shapes, not a defect in the estimator itself. See "Known limitation"
-  above.
+  the true density's sharp corner spike. The first hypothesis — that the
+  notebook's fixed, global `lambda_roughness = 0.15` was over-smoothing
+  these edges specifically — did NOT hold up once actually tested with
+  `hdcd`'s new per-node roughness-selection option: held-out
+  log-likelihood, the honest criterion, confirms 0.15 is already close to
+  optimal for these edges, and a lighter penalty measurably overfits.
+  The remaining mismatch looks more like a basis-expressivity limit of a
+  bounded degree-4 Bernstein polynomial than a tunable smoothing bug. See
+  "Known limitation" above — including the correction to the original,
+  less rigorous diagnosis.
+- Built the requested follow-up (a non-global, LEARNED `lambda_roughness`
+  option, spec section 18) directly in the C core with its own test
+  coverage, not as a notebook-only hack — see `DECISIONS.md`. It works
+  correctly (verified: per-node adaptivity, no leakage into the outer
+  holdout, fully backward compatible when unused) and was the right tool
+  to properly check the hypothesis above, even though the answer it gave
+  was "no" rather than the expected "yes."

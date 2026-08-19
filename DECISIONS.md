@@ -989,3 +989,114 @@ are explicit that the reference DAG is a density-factorization choice, not
 a causal claim (spec §19, §34). A near-tied `Delta_KL` on the flipped edge
 is direct, concrete evidence of that disclaimer rather than a defect to
 hide by re-seeding until it disappears.
+
+---
+
+## Post-M12 feature — non-global, learned `lambda_roughness` (per-node roughness selection)
+
+Requested explicitly after the vine-recovery notebook's "Known limitation"
+section diagnosed the fixed, global `lambda_roughness` as over-smoothing
+Clayton/Gumbel edges. The user asked to pursue a non-global, LEARNED
+roughness penalty as an option, per spec §18 ("`lambda_R` is selected by
+validation unless explicitly provided" / "a small validation grid is
+sufficient for version 1").
+
+**Implemented in the C core** (`include/hdcd/local_fit.h`,
+`src/optimize/local_fit.c`), not just in a binding: two new optional
+fields on `hdcd_local_fit_options_t`, `lambda_roughness_grid` (candidate
+values) and `roughness_validation_fraction`. Empty/NULL grid (the
+default) is a complete no-op — behavior is bit-for-bit identical to
+before, verified via a dedicated regression test
+(`test_roughness_grid_matches_fixed_when_singleton`) and the full
+pre-existing C/R test suites passing unchanged. `hdcd_dag_fit` needed NO
+changes: it already forwards one `hdcd_local_fit_options_t` per node
+unchanged, so per-node selection falls out automatically once
+`hdcd_local_fit_node` supports it.
+
+**Selection happens via an INNER split of the outer TRAIN rows, never
+touching the outer holdout.** `hdcd_local_fit_node`'s existing TRAIN rows
+are further split into `inner_train`/`inner_val` (a fresh seeded
+shuffle, `options->seed XOR`'d with a fixed constant so it's
+reproducible but not identical to the outer split); every grid candidate
+is fit on `inner_train` and scored on `inner_val`; the winning lambda is
+then refit on the FULL outer train and scored on the untouched outer
+holdout exactly as the fixed-lambda path always has. This matters
+because the outer holdout feeds `hdcd_dag_fit_kl_estimate` /
+`hdcd_dag_fit_kl_difference` and (when this options struct reaches
+`hdcd_run_annealing`) the annealing objective itself -- letting penalty
+selection see that data first would bias exactly the scores used to
+compare models. Refactored the previously-inline Theta/Sinkhorn/holdout-
+score logic into a shared static `fit_and_score()` helper parametrized by
+which rows are "train" vs "score", used for both a grid candidate's inner
+fit and the final production fit -- this is why the singleton-grid
+regression test above holds exactly, not just approximately: the
+production fit is byte-for-byte the same code path either way.
+
+**Deliberately kept OUT of `hdcd_run_annealing`'s inner proposal loop.**
+Spec §18 is explicit: "Penalty selection must occur outside the inner
+annealing loop. Do not nest an expensive continuous penalty search inside
+every graph proposal." `hdcd_run_annealing` calls `compute_node_score` ->
+the local-fit cache -> `hdcd_local_fit_node` for every distinct parent set
+a proposal tries; enabling the grid there would repeat an O(grid size)
+search on every one of those. The C core does not forbid it (the options
+struct is generic), but the R binding's `hdcd_fit()` deliberately forwards
+`lambda_roughness_grid` ONLY to the final reference-DAG fit
+(`.dag_fit_c`), never to `.run_annealing_c` -- the annealing search itself
+keeps using the single fixed `lambda_roughness` throughout, unchanged.
+
+**R binding**: `hdcd_r_dag_fit`'s `.Call` arity grew from 10 to 12
+(two new trailing args, both defaulting to "disabled" -- `numeric(0)`
+grid, `0` fraction -- so existing 10-arg-shaped call sites needed no
+changes beyond the two new default parameters). `hdcd_fit()` and
+`hdcd_fit_dag()` both gained `lambda_roughness_grid`/
+`roughness_validation_fraction` parameters; `hdcd_fit_dag()` defaults to
+reusing whatever grid `model` itself was fit with, so a candidate DAG is
+compared on equal footing rather than silently reverting to a fixed
+lambda. Added `hdcd_node_lambda_roughness(model, node)` (new C accessor
+`hdcd_local_fit_selected_lambda_roughness`, NAN for a root node) so a
+user can inspect what was actually selected per node.
+
+**Important correction to the earlier "Known limitation" diagnosis.**
+Running the new, properly-validated selection on the vine-recovery
+notebook's exact data was expected to confirm that a lighter penalty
+helps the Clayton/Gumbel edges. It did NOT: held-out log-likelihood --
+the honest, principled criterion available in any real (non-synthetic)
+application, unlike "correlation to the hidden true density" which is
+only computable here because ground truth is known -- showed a clear
+INTERIOR OPTIMUM near lambda approx 0.15-0.3 for every edge tested,
+Clayton and Gumbel included (e.g. edge 1->2 Clayton: holdout score rises
+from -0.12 at lambda=0.05 to a peak of 0.35 at lambda=0.15, then falls
+off again at 0.3/0.6/1.0/2.0; edge 7->8 Gumbel peaks similarly at
+lambda=0.15). The earlier notebook section's premise -- eyeballing
+fitted-vs-true density correlation and concluding "a lighter penalty
+fits better" -- was measuring a different thing than the estimator's own
+predictive accuracy, and does not survive contact with the metric that
+actually matters. The corner-flattening on sharp Archimedean
+tail-dependence edges is better understood as a basis-expressivity limit
+(a degree-4 centered Bernstein tensor is a smooth, bounded polynomial
+family; it cannot represent a singular corner spike regardless of how
+lightly it's regularized) rather than as a fixable over-smoothing bug.
+See `notebooks/vine_copula_recovery.Rmd`'s revised "Known limitation"
+section, which now demonstrates the auto-selection feature directly and
+reports this corrected conclusion rather than the original, less rigorous
+one.
+
+**Adding fields to `hdcd_local_fit_options_t` required updating the
+Python and Julia bindings too, even though neither exposes the new
+feature.** Both mirror this struct's exact memory layout for FFI --
+`python/hdcd/_capi.py`'s `HdcdLocalFitOptions(ctypes.Structure)` and
+`julia/src/HDCD.jl`'s `struct HdcdLocalFitOptions` -- and both were
+missing the three new trailing fields until updated here, which would
+have silently misaligned every field of `HdcdAnnealingOptions` (which
+embeds this struct) passed across either FFI boundary: not a compile
+error, a silent ABI mismatch. Caught by rule, not by accident (the
+Python file's own header comment: "every struct layout ... must match
+the C headers EXACTLY ... or the ABI breaks silently") and confirmed by
+rerunning both full test suites after the fix (Python: 9/9 passing;
+Julia: 32/32 assertions passing) -- this is the check to repeat for any
+future change to a struct either binding mirrors, not just this one.
+Both bindings default the three new fields to "disabled" (NULL
+pointer / zero size), so neither exposes per-node roughness selection
+yet; only the R binding does. Extending Python/Julia to expose it is a
+straightforward follow-up (the C core and R binding are the reference
+implementation) but wasn't asked for here.
