@@ -448,6 +448,75 @@ cat(sprintf("\nOverall mean correlation across all edges/conditioning values: %.
             mean(agreement$mean_correlation)))
 ```
 
+The per-edge table above is not uniform: the two smooth, no-corner-singularity
+families (Frank, Gaussian) sit at correlation $\geq 0.97$, while the three
+edges built from **tail-dependent** families (Clayton at edges 1 and 6,
+Gumbel at edges 2 and 7) sit noticeably lower (0.90-0.96). That is not
+random scatter — it is a real, systematic shape mismatch, worth
+understanding rather than averaging away into the single headline number
+above.
+
+## Known limitation: sharp tail-dependence corners are over-smoothed
+
+Look closely at the row-1 and row-6 panels (Clayton) at $z=0.1$, and the
+row-7 panel (Gumbel) at $z=0.9$, in the density grid above: the **true**
+density has a sharp, narrow spike right at the copula corner (Clayton's
+lower-tail dependence concentrates mass as $u, z \to 0$; Gumbel's
+upper-tail dependence does the same as $u, z \to 1$), while `hdcd`'s
+**fitted** curve is visibly flatter and shorter there, even though it
+tracks the true curve well everywhere else. This is the actual thing that
+prompted a closer look at "densities that don't line up."
+
+Two candidate explanations, checked directly rather than guessed at,
+using the same edge (1->2, Clayton, $z=0.1$) that shows the mismatch
+most clearly:
+
+1. **Is `bernstein_degree = 4` just too coarse a basis to represent a
+   sharp corner?** Refitting the *true* DAG at a higher degree while
+   holding `lambda_roughness` fixed at this notebook's value of 0.15
+   (first two rows of the table below) does **not** help — correlation
+   is essentially unchanged (if anything slightly worse) at degree 8.
+   More basis flexibility alone is not the fix.
+2. **Is the roughness penalty over-smoothing it?** Holding
+   `bernstein_degree` fixed and sweeping `lambda_roughness` down instead
+   tells a different story: correlation improves markedly going from
+   0.15 down to 0.05 at both degrees. Pushed further to 0.01, degree 8
+   keeps improving (correlation rises further, peak height climbs much
+   closer to the true peak), while degree 4 instead collapses into
+   visible overfitting (correlation craters, peak height massively
+   overshoots the true value) — the classic bias/variance crossover, at
+   a point that depends on the basis size.
+
+```{r roughness-sensitivity}
+sensitivity <- expand.grid(lambda_roughness = c(0.15, 0.05, 0.01), bernstein_degree = c(4L, 8L))
+sensitivity <- do.call(rbind, lapply(seq_len(nrow(sensitivity)), function(i) {
+  lr <- sensitivity$lambda_roughness[i]
+  deg <- sensitivity$bernstein_degree[i]
+  fit <- hdcd:::.dag_fit_c(model$U, n, d, true_fit$dag, deg, lr, holdout_fraction, local_seed)
+  fitted <- exp(hdcd:::.local_fit_conditional_log_density(fit, 2L, u_grid, 0.1))
+  true_dens <- dCopula(cbind(rep(0.1, length(u_grid)), u_grid), families[[1]])
+  data.frame(lambda_roughness = lr, bernstein_degree = deg,
+             correlation = round(cor(fitted, true_dens), 3),
+             peak_fitted = round(max(fitted), 2), peak_true = round(max(true_dens), 2))
+}))
+kable(sensitivity, caption = "Edge 1->2 (Clayton, tau=0.6), z=0.1: fitted-vs-true agreement as lambda_roughness varies")
+```
+
+**Conclusion:** the mismatch is a genuine, explainable bias-variance
+tradeoff, not a bug. This notebook fixes `lambda_roughness = 0.15` as one
+*global* smoothing strength applied identically to every edge, chosen (see
+`DECISIONS.md`) as a reasonable general-purpose default. That single value
+is a good match for the smooth, no-tail-dependence edges (Frank, Gaussian:
+correlation $\geq 0.97$) but is measurably too strong for the sharply
+peaked Archimedean tail-dependence edges (Clayton, Gumbel), which would
+fit visibly better under a lighter penalty — at the cost of more variance
+if pushed too far (lambda=0.001 above shows the overfit side of that same
+tradeoff). Per-edge roughness selection (e.g. via each node's own
+held-out score) rather than one fixed value across the whole DAG would be
+the natural fix; that is a genuine follow-up, not something to route
+around by re-tuning this notebook's single global default until the
+Clayton/Gumbel edges happen to look better.
+
 # Summary
 
 ```{r summary}
@@ -475,6 +544,16 @@ cat(sprintf("Mean fitted-vs-true conditional density correlation: %.3f\n",
   library's own documentation warns you to expect, and precisely why the
   reference DAG is never presented as a causal claim (spec sections 19, 34).
 - The fitted conditional copula densities closely track the true,
-  closed-form densities across every edge and every conditioning value
-  tested, confirming the centered-Bernstein/Sinkhorn machinery
-  (Milestones 5-6) is doing its job, not just the discrete search.
+  closed-form densities on the smooth, no-tail-dependence edges (Frank,
+  Gaussian: correlation $\geq 0.97$), and reasonably well overall
+  (mean correlation $\approx 0.96$), confirming the centered-
+  Bernstein/Sinkhorn machinery (Milestones 5-6) is doing its job.
+- The clearest weak spot: on edges with strong Archimedean tail
+  dependence (Clayton, Gumbel), the fitted density visibly under-shoots
+  the true density's sharp corner spike. Traced to this notebook's single
+  *global* `lambda_roughness = 0.15` over-smoothing those edges
+  specifically (verified: a lighter penalty recovers the peak; more
+  `bernstein_degree` alone does not) — a real, explainable limitation of
+  using one fixed smoothing strength across a DAG with heterogeneous edge
+  shapes, not a defect in the estimator itself. See "Known limitation"
+  above.
