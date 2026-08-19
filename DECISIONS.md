@@ -849,3 +849,80 @@ silently skipped) — plus a standalone smoke-test script exercising the
 full `hdcd_fit` -> `transform`/`predict`/`copula_logpdf`/`fit_dag`
 pipeline end to end, matching the verification rigor applied to
 Milestone 10.
+
+---
+
+## Milestone 12 — Julia binding
+
+**`ccall` with structs passed and returned by value directly** (no
+separate glue-C layer like R's, no `ctypes.Structure` marshaling layer
+like Python's). Julia's FFI can pass/return `isbits` structs across
+`ccall` directly, matching C ABI layout as long as the Julia `struct`'s
+field order and types mirror the C header exactly — the same discipline
+as Python's `_capi.py`, just with less boilerplate, since Julia doesn't
+need a separate binding-declaration step (`argtypes`/`restype`) the way
+`ctypes` does. This is the most direct of the three bindings, structurally,
+because `ccall` is a first-class language construct rather than a library
+(`ctypes`) or a translation layer (R's `.Call`).
+
+**No dependency on a general JSON package for the fixture-agreement
+test.** `Pkg.add` needs registry/network access this sandboxed
+environment may not reliably have at test time, and the ONLY thing
+needed is reading one fully-controlled, self-generated fixture file —
+so `test/runtests.jl` includes a ~70-line self-contained recursive-
+descent JSON reader (`TinyJSON`) scoped to exactly what `fixture.json`
+contains (numbers, booleans, nested arrays, unescaped string keys),
+rather than pulling in JSON.jl/JSON3.jl as a real dependency for a
+narrow, controlled use. Consistent with the project's general "add a
+dependency only when it earns its complexity" stance (e.g. skipping
+`dcor_fast.c`, `sinkhorn/quadrature.c` as empty wrapper files in earlier
+milestones) — a full JSON parser would be the same kind of unjustified
+weight here.
+
+**A genuine GC-safety bug caught before it shipped, not after:** the
+first draft of `run_annealing` captured `pointer(ordering0)` and
+embedded it inside the `HdcdAnnealingOptions` struct, then called
+`GC.@preserve ordering0` *after* the `ccall` had already returned —
+which protects nothing, since the risk window is *during* the call.
+Julia's `ccall` automatically roots/preserves arrays passed *directly*
+as arguments (like `U`/`mask` here), but that automatic protection does
+NOT extend to a raw pointer manually captured via `pointer(...)` and
+stashed inside a struct value passed by value — `ordering0` needed
+explicit `GC.@preserve` wrapping the actual `ccall`, not a statement
+after it. Fixed before ever running the code (caught while re-reading
+the draft, not via a crash), and left the reasoning as a comment at the
+call site since this exact class of mistake (preserving too late, or
+assuming struct-embedded pointers get the same auto-protection as
+direct arguments) is the single most Julia-specific FFI hazard in this
+whole binding and worth flagging for future edits.
+
+**Julia arrays need NO column-major conversion, exactly like R
+(Milestone 11) and unlike Python (Milestone 10).** Julia's native
+`Matrix` layout is already column-major, matching `hdcd`'s core layout
+(spec section 23) with no `asfortranarray`-style step anywhere in this
+module — the same property noted for R, now confirmed true for all
+three "modern statistical computing language" bindings sharing this
+trait, while only the row-major-by-default `numpy` binding needed an
+explicit conversion.
+
+**`fit_dag`/`score_dag` are two separate functions returning `Delta_KL`
+as a plain return value (spec section 27's own conceptual snippet:
+`result = fit_dag(model, candidate)` then `score_dag(model, result)`),
+matching R's pattern (Milestone 11) rather than Python's
+`result.kl_divergence_` attribute-style (Milestone 10).** All three
+language sections of the spec (25, 26, 27) sketch the SAME underlying
+comparison in each language's own conceptual idiom; followed each one
+literally for its own binding rather than picking one pattern and
+forcing it onto all three.
+
+**Verified end-to-end matching the rigor applied to Milestones 10-11:**
+deleted `build/` and `julia/Manifest.toml` entirely, rebuilt the C
+shared library from scratch (`make shared`), ran `Pkg.instantiate()` +
+`Pkg.test()` from nothing — 32 assertions across 11 testsets, 0
+failures — plus a standalone smoke-test script exercising the full
+`hdcd_fit` -> `transform_copula`/`logpdf`/`copula_logpdf`/`fit_dag`/
+`score_dag` pipeline end to end. `julia/Manifest.toml` itself is
+gitignored (not committed): with `Libdl` (a stdlib, always bundled with
+the Julia installation) as the only dependency, it pins little beyond
+"which Julia version generated it," unlike a project with real external
+dependencies where a lockfile earns its keep.

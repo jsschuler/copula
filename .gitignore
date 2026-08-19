@@ -16,3 +16,8 @@ r/src/*.rds
 r/src/symbols.rds
 *.Rcheck/
 
+# Julia environment resolution artifact (julia/, Milestone 12) -- the
+# only dependency is the Libdl stdlib, so this pins little beyond "which
+# Julia version generated it"; not worth committing.
+julia/Manifest.toml
+
