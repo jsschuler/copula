@@ -304,3 +304,152 @@ checking the conditional-integral constraint immediately after the
 tell you nothing about whether the joint fixed point has been reached.
 The implementation always recomputes both error terms from the latest
 `a` and `b` together, matching spec §11.2's metric literally.
+
+---
+
+## Milestone 7 — fixed-DAG fitting
+
+The largest milestone so far, tying together everything since Milestone
+1. Several of the entries below were only discovered by actually running
+the pipeline against real dependent data — not designed in up front —
+and are logged in the order they were found, since later fixes depend on
+understanding earlier ones.
+
+**RNG module (`hdcd/rng.h`, `src/rng/rng.c`) pulled forward from its
+originally-scheduled later milestone.** Spec §22 lists `rng/rng.c`
+alongside the annealing/sampling modules, but §16's held-out scoring
+("compare parent sets on a common held-out subset... store effective
+sample size") needs a reproducible train/holdout split *now*, which
+needs a real seeded RNG, not another test-only PRNG copy-pasted into
+library code. Minimal by design: seed, uniform-in-(0,1), and a
+Fisher-Yates shuffle — nothing annealing/sampling will need later has
+been speculatively added.
+
+**DAG acyclicity is enforced incrementally, at `hdcd_dag_add_edge` time,
+via reachability (BFS), not deferred to a validation pass.** A DAG built
+exclusively through the public API is therefore always acyclic by
+construction — cheaper to reason about downstream (no code path ever
+needs to handle "this `hdcd_dag_t` might secretly be cyclic"). A general
+`hdcd_dag_topological_order` (Kahn's algorithm) is still provided as an
+independent validator, since spec §19 (a later milestone) needs to
+validate arbitrary externally-supplied DAGs, not just ones built via
+`add_edge`.
+
+**`dag/validation.c` (named in spec §22) was folded into `graph.c`,
+same reasoning as prior "no empty wrapper file" decisions** (Milestone
+3's `dcor_fast.c`, Milestone 6's `sinkhorn/quadrature.c` and
+`monte_carlo.c`): topological-order validation is a few dozen lines that
+belongs next to the structure it validates, not split into its own file
+for the sake of matching the spec's suggested layout exactly.
+
+**Theta-fitting and Sinkhorn normalization are two separate SEQUENTIAL
+steps — fit Θ once via a raw-kernel surrogate objective, then
+Sinkhorn-normalize once — not an alternating/joint optimization through
+Sinkhorn's implicit fixed point.** This is a direct reading of spec
+§28's literal, numbered step list ("3. optimize edge coefficient
+matrices; 4. apply Sinkhorn normalization" — two distinct, ordered
+steps, not one). It also sidesteps implicit differentiation through an
+iterative fixed-point procedure (Sinkhorn), which spec doesn't ask for
+and which would be substantial additional machinery for a "version 1"
+system. The Θ-fit surrogate objective is `sum_i g_jk(u_i,z_i;Θ_jk) -
+λ_R·R(Θ_jk)` (the raw log-kernel fit to the data, ignoring how `a,b`
+*would* renormalize if refit) — this is well-posed to optimize on its
+own because `g_jk` is *linear* in Θ_jk (a fixed outer-product
+statistic `M_jk` dotted with Θ_jk), making the surrogate a simple
+linear-plus-quadratic (hence concave, for `λ_R>0`) function, solvable by
+plain gradient ascent without any risk of local optima.
+
+**`q_j(z)` for Sinkhorn is exactly the training rows' own observed
+parent values — no model sampler is built or needed.** This resolved
+what looked, in the Milestone 6 planning notes, like it might require
+sampling from a partially-built joint model (real machinery that
+doesn't exist until much later milestones). It doesn't: the empirical
+distribution of a node's *training* parent-vector rows already **is**
+(an empirical approximation of) `q_j(z)`, so passing those rows directly
+as Sinkhorn's `z_samples` is both the simplest and the mathematically
+correct choice, not a shortcut — matching spec §11.2's own phrasing
+("Monte Carlo samples from the fitted parent distribution").
+
+**M_jk (the Θ-fit sufficient statistic) is the MEAN, not the SUM, of
+per-row outer products.** Discovered via actual divergence: an early
+version summed `hdcd_bernstein_tensor_gradient(u_i,z_i,m)` over all
+training rows without dividing by `n_train`. Since the roughness penalty
+`λ_R·R(Θ)` doesn't scale with `n_train`, a fixed `λ_R` regularizes less
+and less as the dataset grows — Theta diverged, `R(Theta)` reached
+~75,000, and both the Θ-fit and Sinkhorn failed to converge. Averaging
+keeps `λ_R`'s effective strength independent of dataset size, the way
+ridge regression divides the squared-error term by `n` for the same
+reason.
+
+**A small fixed-fraction L2 "ridge backstop"
+(`HDCD_LOCAL_FIT_RIDGE_FRACTION = 0.02`, i.e. `0.02·λ_R`) is added to
+the Θ-fit objective and gradient, beyond what spec §10 literally
+specifies.** After fixing the mean-vs-sum bug above, Θ *still* failed to
+converge, because `R(Θ)` has a non-trivial null space: any
+`Θ[r][s] = a·r·s + b·r + c·s + d` surface has **zero** second difference
+along both axes (the exact fact exploited deliberately in
+`examples/example_bernstein.c` back in Milestone 5 — a bilinear surface
+is "smooth" by this penalty's own definition but still contributes a
+nonzero kernel). Whenever the data's sufficient statistic `M_jk` has any
+nonzero component along that ~4-dimensional null space — generic for
+real data — the raw objective is **unbounded** along it: gradient ascent
+never converges, and more iterations make the held-out score *worse*
+(confirmed empirically: sweeping iteration budgets from 300 to 2000
+made held-out log-likelihood strictly worse for most `λ_R` values before
+this fix). The ridge backstop makes the objective globally strictly
+concave (a bounded, unique optimum exists) without materially changing
+`R`'s intended smoothing behavior for typical `λ_R`, since it's two
+orders of magnitude smaller. This is a necessary well-posedness fix, not
+a modeling choice — it is not exposed as a user-facing option, and spec
+§10's literal `R(Θ)` formula is unchanged; only the *optimizer* adds this
+term internally.
+
+**Θ-fit convergence is judged by relative objective-improvement, not
+raw gradient norm.** Direct consequence of the ridge backstop being
+deliberately tiny: it makes the objective bounded, but also genuinely
+ill-conditioned (curvature ratio ~50:1 between the roughness-penalized
+and ridge-only directions), so the gradient norm along the near-flat
+ridge direction shrinks extremely slowly even long after the objective
+value itself has clearly stopped moving in any way that matters.
+Confirmed empirically: gradient-norm convergence never triggered even at
+2000 iterations for weaker `λ_R`, while the objective had visibly
+plateaued within a few dozen. Relative objective improvement
+(`|Δobjective| < tol·(1+|objective|)`) is standard practice for exactly
+this "bounded but ill-conditioned" situation, and is what
+`hdcd_local_fit_options_t.theta_tol` now means (documented as such in
+the header, not left implicit).
+
+**Default `theta_max_iterations` raised from an initial guess of 300 to
+2000.** Empirically bisected: with the fixes above, `λ_R=0.1` (a
+moderate, reasonable regularization strength) needs roughly 1200
+iterations of plain backtracking gradient ascent to satisfy the relative
+objective-improvement criterion at the default tolerance. 2000 gives
+comfortable headroom without being wastefully large. Weaker `λ_R` needs
+more (the ill-conditioning above scales with `1/λ_R`); a caller fitting
+with unusually weak regularization should raise `theta_max_iterations`
+explicitly.
+
+**Node-wise Bernstein degree tuning (spec §9: "may optionally be tuned
+node-wise over a small discrete grid") is not implemented.**
+`hdcd_dag_fit` uses the same `hdcd_local_fit_options_t` — including the
+same `bernstein_degree` — for every node. Spec marks node-wise tuning as
+optional; implementing it would mean a grid search wrapped around
+`hdcd_local_fit_node` per node, which is a straightforward addition for
+a later pass but adds real scope (needs its own held-out comparison
+logic) not required for M7's acceptance criteria.
+
+**Conditional CDF evaluation (spec §13) was not implemented in this
+milestone.** M7's explicit "Implement" list (spec §31) is DAG
+validation, local parent-set fitting, composite missing-data score,
+held-out KL/cross-entropy, parameter storage, and factorized log
+density — conditional CDF evaluation isn't on it, and isn't needed by
+anything M7 tests. Deferred to whenever it's actually consumed (likely
+alongside sampling).
+
+**Joint log-density evaluation (`hdcd_dag_fit_joint_log_density`)
+requires every dimension of the query point to be observed; it does not
+integrate out missing dimensions.** Spec §16 explicitly places full
+observed-data likelihood (which would require integrating over missing
+coordinates) out of scope for v1 ("`L_i = ∫ c(u_obs, u_mis) du_mis`...
+explicitly out of scope for version 1"), so this restriction is spec-
+mandated, not a simplification introduced here.
