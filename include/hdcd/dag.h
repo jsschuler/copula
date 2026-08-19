@@ -55,6 +55,13 @@ hdcd_status_t hdcd_dag_parents(const hdcd_dag_t *dag, size_t child, size_t *out)
  */
 hdcd_status_t hdcd_dag_topological_order(const hdcd_dag_t *dag, size_t *order_out);
 
+/*
+ * Deep copy: a new hdcd_dag_t with the same dimension, k_max, and edge
+ * set as `src`. Used by the annealing search (Milestone 8) to snapshot
+ * the best-so-far graph independently of the graph it keeps mutating.
+ */
+hdcd_status_t hdcd_dag_clone(const hdcd_dag_t *src, hdcd_dag_t **out);
+
 #ifdef __cplusplus
 }
 #endif

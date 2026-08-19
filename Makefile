@@ -2,9 +2,10 @@
 # the copula transform x -> u (Milestone 2), pairwise distance correlation
 # (Milestone 3), MST/persistent-topology ordering (Milestone 4), the
 # centered Bernstein tensor basis (Milestone 5), Sinkhorn normalization
-# (Milestone 6), and fixed-DAG fitting (Milestone 7). Simulated annealing /
-# DAG search, EVT tails, and language bindings are excluded until their
-# respective milestones (spec section 31).
+# (Milestone 6), fixed-DAG fitting (Milestone 7), and simulated-annealing
+# DAG search (Milestone 8). Alternative-DAG comparison, EVT tails, and
+# language bindings are excluded until their respective milestones
+# (spec section 31).
 
 CC ?= cc
 CFLAGS ?= -std=c99 -Wall -Wextra -Wpedantic -O2 -g
@@ -38,7 +39,10 @@ LIB_SRCS := \
   src/rng/rng.c \
   src/dag/graph.c \
   src/optimize/local_fit.c \
-  src/core/model.c
+  src/core/model.c \
+  src/dag/cache.c \
+  src/dag/proposals.c \
+  src/optimize/annealing.c
 LIB_OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 STATIC_LIB := $(BUILD_DIR)/libhdcd.a
 

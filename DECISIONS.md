@@ -453,3 +453,104 @@ observed-data likelihood (which would require integrating over missing
 coordinates) out of scope for v1 ("`L_i = ∫ c(u_obs, u_mis) du_mis`...
 explicitly out of scope for version 1"), so this restriction is spec-
 mandated, not a simplification introduced here.
+
+---
+
+## Milestone 8 — simulated annealing DAG search
+
+**`K_hat_j(P)` (spec §15/§17's estimated cross-entropy) is instantiated
+directly as `-hdcd_local_fit_holdout_score(fit)`, not recomputed via a
+separate Monte Carlo estimate.** Spec §15 defines `K_j(P) =
+-E_c*[log c_j(U_j|U_P)]`; Milestone 7's held-out normalized score
+`ell_bar_j(P) = (1/n_holdout) sum log c_j(u_ij|u_iP)` is already exactly
+this quantity's empirical estimate, computed on data the fit never
+trained on (spec §16's whole reason for holding data out: "raw summed
+likelihoods are not directly comparable" across parent-set sizes). Since
+`J_j(P) = K_hat_j(P) + lambda_E|P| + lambda_R*sum R(Theta_jk)` and M7's
+`hdcd_local_fit_t` already exposes both `holdout_score` and
+`roughness_penalty`, `J_j(P)` is a two-line formula over existing
+Milestone 7 outputs — no new estimation machinery needed.
+
+**Proposals respect a fixed ordering (spec §7:
+`Pa(pi_j) ⊆ {pi_1,...,pi_{j-1}}`) rather than relying on `hdcd_dag_t`'s
+general incremental cycle check.** This is a direct reading of spec §7
+("Given ordering pi...") — the reference-DAG search operates within a
+fixed topological backbone, not over arbitrary DAG space. Restricting
+candidate parents to strictly-earlier-in-`ordering` nodes makes every
+proposal cycle-free *by construction*, which is both more efficient
+(O(1) ordering-position lookup instead of a BFS reachability check per
+proposal) and more faithful to what spec §7 actually describes: the
+ordering constrains the *search space*, not merely a cycle-detection
+afterthought. `hdcd_dag_add_edge`'s general cycle check still runs
+underneath (from Milestone 7) and would reject a cycle if one were
+somehow proposed — it just never has anything to reject here. Arbitrary
+non-ordering-respecting DAGs are Milestone 9's concern (`hdcd_dag_t`'s
+general validator already exists for exactly that).
+
+**SWAP is evaluated as ONE combined move (remove `k_old`, add `k_new`,
+one refit), not two separate ADD/REMOVE steps.** `J_j(P_j)` depends on
+the *whole* parent set `P_j`, not on individual edges — spec §14's
+additive factorization is additive *across nodes*, not across a single
+node's parents. Scoring a swap as two sequential single-edge moves would
+require an intermediate (and never-really-existing) one-parent-fewer
+state to be fit and scored, wasting a fit and misrepresenting what's
+actually being compared (the *final* parent set against the *original*
+one).
+
+**The local-fit cache (`src/dag/cache.c`, spec §17.3) is internal, not
+exposed in `annealing.h`.** Spec frames it as an implementation detail
+("changing one local edge should require refitting only the affected
+child factor unless cache reuse is possible") rather than something a
+caller needs to configure or inspect. It persists across restarts within
+one `hdcd_run_annealing` call (a fit for a given `(child, parent-set)`
+is deterministic given the data and options, so a later restart
+rediscovering an earlier restart's parent set gets a free cache hit) but
+not across separate `hdcd_run_annealing` calls, since nothing outlives
+one call to hold it.
+
+**Tested "cached and uncached scores agree" (spec §31 M8) via direct
+determinism of `hdcd_local_fit_node` (Milestone 7's public API), not by
+reaching into the private cache.** The cache's correctness *is*
+precisely this determinism property — a cache hit is only valid because
+a fresh re-fit of the same `(child, parent-set)` is guaranteed to
+produce a bit-identical result. Since `tests/` only sees public headers
+(the cache lives in `src/dag/cache.h`, not `include/hdcd/`), the most
+direct and honest test available through the public surface is calling
+`hdcd_local_fit_node` twice with identical arguments and checking the
+scores match exactly — which is both a valid stand-in for "the cache
+behaves correctly" and independently meaningful (it's the same
+reproducibility guarantee every other stochastic-but-seeded routine in
+this codebase has been tested for since Milestone 1).
+
+**`dag/proposals.c` and `dag/cache.c` (both named in spec §22) were kept
+as real, separate files — unlike earlier "no empty wrapper" decisions
+(Milestone 3's `dcor_fast.c`, Milestone 6's `sinkhorn/quadrature.c`).**
+Both have substantial, genuinely separable logic (move generation with
+three distinct kinds and ordering-aware eligibility; a keyed cache with
+its own lookup/insert/free lifecycle) that would clutter
+`optimize/annealing.c` if inlined. `dag/schedules.c` (also named in
+spec §22) was *not* given its own file: the temperature schedule is a
+single geometric-decay formula (`T_t = T_0 * cooling_rate^t`) with two
+scalar parameters already in `hdcd_annealing_options_t` — a whole file,
+or a "pluggable schedule object" abstraction, for one line of math would
+be the over-engineering spec's own "small validation grid is sufficient
+for version 1" spirit (§18) argues against.
+
+**Automatic `lambda_E`/`lambda_R` selection via a validation grid (spec
+§18) is NOT implemented.** Both remain caller-supplied, required
+parameters (`lambda_R` already was, since Milestone 7). Spec §18's
+requirements aren't gated by any of Milestone 8's three acceptance
+criteria (spec §31: cached/uncached agreement, sparse-graph-beats-empty,
+seed reproducibility) — none require automatic penalty selection to
+pass. Deferred to a later pass, where it would wrap `hdcd_run_annealing`
+in a small outer grid search (spec §18: "must occur outside the inner
+annealing loop" — already structurally satisfied by keeping it a
+separate, later concern rather than threading it through the search
+loop itself).
+
+**Verified end-to-end, not just unit-tested:** the example
+(`examples/example_annealing.c`) builds a 4-node synthetic "diamond"
+(`0->1, 0->2, {1,2}->3`) and the search recovers the exact true edge set
+from the empty graph, dropping `J(G)` from `0` to `-0.78`, in well under
+a second across 3 restarts — a genuine (if small) discovery, not a
+tautology, since the search never sees the true structure, only data.

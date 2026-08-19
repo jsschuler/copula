@@ -271,3 +271,33 @@ hdcd_status_t hdcd_dag_topological_order(const hdcd_dag_t *dag, size_t *order_ou
     }
     return HDCD_OK;
 }
+
+hdcd_status_t hdcd_dag_clone(const hdcd_dag_t *src, hdcd_dag_t **out) {
+    if (src == NULL || out == NULL) {
+        return HDCD_ERROR_INVALID_ARGUMENT;
+    }
+    *out = NULL;
+
+    hdcd_dag_t *clone = NULL;
+    hdcd_status_t status = hdcd_dag_create(src->d, src->k_max, &clone);
+    if (status != HDCD_OK) {
+        return status;
+    }
+
+    for (size_t c = 0; c < src->d; c++) {
+        for (size_t i = 0; i < src->n_parents[c]; i++) {
+            status = hdcd_dag_add_edge(clone, src->parents[c][i], c);
+            if (status != HDCD_OK) {
+                /* Unreachable in practice: src is already a valid DAG
+                 * under the same k_max, so every edge it has must be
+                 * re-addable. Fail clearly rather than return a
+                 * silently incomplete clone. */
+                hdcd_dag_free(clone);
+                return status;
+            }
+        }
+    }
+
+    *out = clone;
+    return HDCD_OK;
+}
