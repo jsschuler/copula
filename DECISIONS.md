@@ -749,3 +749,103 @@ reference to the array — a real use-after-free hazard, not just an
 immutability nicety. A defensive copy trades a small amount of memory
 for genuine safety, which is the right tradeoff for a "read-only fitted
 component," not a hot-path return value.
+
+---
+
+## Milestone 11 — R binding
+
+**Static linking against `libhdcd.a`, not `dlopen`-ing the shared
+library like the Python binding.** R packages with a `src/` directory
+are compiled by `R CMD INSTALL` itself into one package-specific shared
+object (`hdcd.so`); the natural way to pull in the C library is to link
+`libhdcd.a` straight into that build (`PKG_LIBS` in `Makevars`), producing
+one self-contained artifact with no runtime library-search-path problem
+to solve at all — unlike Python's `ctypes.CDLL`, which has to *find* a
+separately-built shared library at import time (`_capi.py`'s
+`_candidate_library_paths` fallback chain). Different mechanism per
+language because each language's own native extension-loading model
+calls for it, not because of any inconsistency in approach.
+
+**Added an `r/src/Makevars` prerequisite that runs `make -C ../.. lib`
+before compiling the glue code, and a new plain `lib` Makefile target
+(static library only, no tests/examples) to invoke.** Mirrors Python's
+`setup.py` `build_py` override (Milestone 10): `R CMD INSTALL r` alone
+should be sufficient, without the user needing to build the C library by
+hand first. `lib` (rather than reusing `all`) exists specifically so this
+prerequisite doesn't also rebuild the entire C test/example suite as an
+unwanted side effect of installing the R package. Verified by deleting
+`build/` entirely and re-running `R CMD INSTALL` from scratch: it
+rebuilds everything from nothing, correctly.
+
+**R matrices need NO column-major conversion at all** — unlike Python's
+NumPy (which defaults to row-major and needs `np.asfortranarray`), R
+already stores matrices column-major internally, which is *exactly*
+`hdcd`'s expected core layout (spec §23). `REAL(matrix_sexp)` in the
+`.Call` glue is passed straight through as `hdcd`'s `double*`, genuinely
+zero-copy, with no equivalent of Python's `_as_column_major` helper
+needed at all. This is spec §26's "preserve column-major memory where
+possible" being close to free in R specifically, not a coincidence of
+this implementation.
+
+**`NA_real_` detection uses `ISNAN()` (catches both R's specific `NA`
+*and* plain `NaN`), not `ISNA()` (which only catches `NA`).** `ISNA`
+alone would silently treat a data-derived `NaN` (e.g. from `0/0`
+upstream in a user's pipeline) as an ordinary observed value rather than
+missing — inconsistent with the Python binding's `np.isnan`-based mask
+construction, which already catches both. Same missingness semantics
+across both bindings, on purpose.
+
+**All `.Call` glue functions take positional scalar arguments (up to 18,
+for `hdcd_r_run_annealing`), not a single R list unpacked field-by-field
+in C.** A generic "extract named field from an R list" C helper would be
+less code at the call site but more code (and more failure surface —
+wrong name string, wrong type coercion) in the glue itself; explicit
+positional parameters are mechanical and let a mismatched argument count
+fail loudly (an R error at the `.Call` boundary) rather than silently
+reading a missing list field as `NULL`/default. This is the same
+"prefer explicit and boring over clever" tradeoff as the Python binding's
+per-struct-field `ctypes.Structure` declarations — just adapted to R's
+`.Call` convention instead of a struct-passing one, since R has no
+native equivalent of passing a C struct by value across the FFI boundary.
+
+**External-pointer finalizer safety is tested with an explicit `gc()`
+mid-test, not merely by trusting R's GC to eventually run.** Spec §31
+M11's "external pointer finalization" acceptance criterion is easy to
+satisfy technically (register a finalizer, done) but easy to get subtly
+wrong (e.g. a `hdcd_dag_t` finalized while a `hdcd_dag_fit_t` still holds
+onto data derived from it, or a struct field accidentally not protected
+during construction). `test-high-level-api.R` forces a collection cycle
+between fitting a model and continuing to use it (`gc()` then
+`hdcd_transform`/`predict`), which would surface a premature-finalization
+bug as a crash or wrong values, not just as "the finalizer function
+exists."
+
+**`fit_dag`/`score_dag` are two separate R functions (matching spec
+§26's own conceptual snippet), not one Python-style object carrying a
+`kl_divergence_` field.** Both spec §25 (Python) and §26 (R) sketch the
+SAME underlying comparison, but in each language's own idiom: Python's
+snippet uses `result.kl_divergence_` (an attribute on the returned
+object), R's snippet uses a second explicit `score_dag(model,
+candidate_fit)` call. Followed each section's own literal pattern for
+its own language rather than force one language's idiom onto the other.
+
+**Reused `python/tests/fixture.json` verbatim for R's cross-check test,
+rather than generating a separate R-only fixture.** Directly satisfies
+spec §29.11's "the same saved test fixture" — one C-computed source of
+truth checked by two independent language bindings, rather than two
+fixtures that could quietly drift apart. The R test resolves the path
+via `testthat::test_path()` (robust to the working directory at test-run
+time) and skips gracefully (not a hard failure) if the fixture or
+`jsonlite` isn't available, so an isolated `R CMD check` environment
+without the sibling `python/` checkout degrades gracefully rather than
+failing for an unrelated reason.
+
+**Verified end-to-end exactly like the Python binding was:** deleted
+`build/` entirely, ran `R CMD INSTALL r` from a clean checkout (which
+rebuilt the C library from scratch via the new `Makevars` prerequisite),
+then ran the full `testthat` suite — 36 assertions, 0 failures, 0
+warnings, 0 skips (confirming the fixture WAS found and used, not
+silently skipped) — plus a standalone smoke-test script exercising the
+full `hdcd_fit` -> `transform`/`predict`/`copula_logpdf`/`fit_dag`
+pipeline end to end, matching the verification rigor applied to
+Milestone 10.

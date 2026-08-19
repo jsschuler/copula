@@ -62,9 +62,14 @@ TEST_BINS := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%,$(TEST_SRCS))
 EXAMPLE_SRCS := $(wildcard examples/*.c)
 EXAMPLE_BINS := $(patsubst examples/%.c,$(BUILD_DIR)/examples/%,$(EXAMPLE_SRCS))
 
-.PHONY: all test examples shared clean
+.PHONY: all test examples shared lib clean
 
 all: $(STATIC_LIB) $(TEST_BINS) $(EXAMPLE_BINS)
+
+# Static library only, no tests/examples -- used by the R package's
+# src/Makevars (Milestone 11), which just needs libhdcd.a to link
+# against and shouldn't pay for rebuilding the whole test/example suite.
+lib: $(STATIC_LIB)
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)

@@ -8,3 +8,11 @@ python/hdcd/libhdcd.so
 __pycache__/
 *.pyc
 
+# R packaging/build artifacts (r/, Milestone 11)
+r/src/*.o
+r/src/*.so
+r/src/*.dylib
+r/src/*.rds
+r/src/symbols.rds
+*.Rcheck/
+

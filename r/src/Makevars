@@ -1,0 +1,17 @@
+# Links statically against the hdcd C library (spec section 26: use
+# .Call, not .C). REPO_ROOT is relative to this file's own directory
+# (r/src/), which R's build system always makes the working directory
+# for compilation -- two levels up from r/src/ is the repository root.
+REPO_ROOT = ../..
+PKG_CPPFLAGS = -I$(REPO_ROOT)/include
+PKG_LIBS = $(REPO_ROOT)/build/libhdcd.a -lm
+
+# Build the static library before compiling/linking the R package's
+# shared object, so `R CMD INSTALL` alone is sufficient (no separate
+# manual `make` step required).
+all: $(SHLIB)
+
+$(SHLIB): $(REPO_ROOT)/build/libhdcd.a
+
+$(REPO_ROOT)/build/libhdcd.a:
+	$(MAKE) -C $(REPO_ROOT) lib

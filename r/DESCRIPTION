@@ -1,0 +1,13 @@
+Package: hdcd
+Type: Package
+Title: High-Dimensional Copula Density Estimation
+Version: 0.1.0
+Description: R bindings (spec section 26) for the hdcd C library:
+    nonparametric marginal smoothing, copula transformation, distance-
+    correlation dependence estimation, persistent-topology variable
+    ordering, sparse DAG factorization via simulated annealing, and
+    centered Bernstein tensor conditional copula factors.
+License: MIT
+Encoding: UTF-8
+Imports: methods
+Suggests: testthat, jsonlite

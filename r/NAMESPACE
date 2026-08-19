@@ -1,0 +1,14 @@
+useDynLib(hdcd, .registration = TRUE)
+
+export(hdcd_fit)
+export(hdcd_transform)
+export(hdcd_copula_logpdf)
+export(hdcd_sample)
+export(hdcd_dependence_matrix)
+export(hdcd_ordering)
+export(hdcd_dag)
+export(hdcd_fit_dag)
+export(hdcd_score_dag)
+
+S3method(predict, hdcd_model)
+S3method(print, hdcd_model)
