@@ -192,3 +192,46 @@ against every other variable, no MST can span all `d` nodes. Per spec
 §24 ("never silently continue after NaN/Inf creation") and §36 rule 13,
 this fails clearly rather than returning a forest or silently dropping
 the disconnected variable from the ordering.
+
+---
+
+## Milestone 5 — Bernstein basis and roughness penalty
+
+**Binomial coefficient via the multiplicative recurrence
+`C(m,r+1) = C(m,r)*(m-r)/(r+1)`, not factorials.**
+Spec §24 explicitly calls this out ("avoid direct factorial evaluation
+for Bernstein coefficients; use recurrence relations where appropriate").
+Direct factorials overflow `double` around `m≈170`; the recurrence stays
+well-behaved far beyond any "modest" degree the spec anticipates (§9).
+
+**`hdcd_bernstein_basis` domain is the closed interval `[0,1]`, not just
+the open copula-scale interior `(epsilon, 1-epsilon)`.**
+Basis-identity tests (partition of unity, boundary values `B_0(0)=1`,
+`B_m(1)=1`) need the exact endpoints; rejecting them would make those
+tests impossible to write cleanly. Values actually flowing through the
+pipeline are already clipped to `(epsilon, 1-epsilon)` by
+`hdcd_transform_to_copula` (Milestone 2), so this wider domain never
+admits values the rest of the system wouldn't otherwise accept.
+
+**Roughness-penalty gradient implemented as direct residual-by-residual
+backprop (scatter `2*d*[1,-2,1]` per second-difference triple), not via a
+closed-form `D^T D` band-matrix kernel.**
+Both are mathematically equivalent, but the scatter approach is a direct,
+easy-to-verify transcription of "differentiate a sum of squared linear
+residuals," rather than requiring a separately-derived (and separately
+bug-prone) closed form. Verified against finite differences in tests
+either way, so this is a legibility choice, not a correctness hedge.
+
+**Discovered while writing the example, not a bug:** a `Theta` surface
+that is additively separable (`Theta[r][s] = f(r) + g(s)`) always
+produces `g(u,z) ≡ 0`, because the *centered* basis sums to exactly zero
+along each axis (`sum_r B~_r(u) = 0` for any `u`, since the raw basis is
+a partition of unity and centering subtracts the constant `1/(m+1)`
+`m+1` times). A bilinear term (`r*s`) is not additively separable and
+survives centering, so `example_bernstein.c` uses
+`Theta[r][s] = a*r*s + b*r + c*s` (still zero roughness penalty, since
+second differences are linear-in-each-index and this form is affine in
+each index separately) to show a non-degenerate `g(u,z)` alongside
+`R(Theta)=0`. Worth remembering for later milestones: only the
+non-additively-separable part of an edge's `Theta` actually contributes
+to the conditional kernel at all.
