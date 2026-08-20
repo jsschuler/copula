@@ -132,6 +132,12 @@ struct HdcdLocalFitOptions
     # default_local_fit_options default below) recovers the original
     # uniform penalty exactly.
     corner_relief::Cdouble
+    # Copula-level EVT tail-splice (see DECISIONS.md's "copula-level EVT
+    # tail-splice"). 0.0 (the default_local_fit_options default below)
+    # disables it entirely -- the plain Bernstein kernel is used
+    # unmodified.
+    evt_splice_gate::Cdouble
+    evt_splice_bandwidth::Cdouble
 end
 
 function default_local_fit_options(; bernstein_degree, lambda_roughness, holdout_fraction, seed,
@@ -143,6 +149,7 @@ function default_local_fit_options(; bernstein_degree, lambda_roughness, holdout
         Ptr{Cdouble}(C_NULL), Csize_t(0), Cdouble(0),
         Ptr{Csize_t}(C_NULL), Csize_t(0), Cdouble(0), Csize_t(0),
         Cdouble(0),
+        Cdouble(0), Cdouble(0),
     )
 end
 

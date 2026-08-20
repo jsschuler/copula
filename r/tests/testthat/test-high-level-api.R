@@ -222,3 +222,56 @@ test_that("a discarded model's external pointers are eventually finalized withou
   gc() # runs registered finalizers; must not error or crash the session
   expect_true(TRUE)
 })
+
+make_clayton_chain_data <- function(n = 1500, theta = 3.0, seed = 1) {
+  set.seed(seed)
+  # Exact Clayton-copula samples via the closed-form conditional-inverse
+  # (h-function inverse) -- the same construction as
+  # tests/test_parametric_tail.c's clayton_hinv and
+  # tests/test_local_fit.c's make_clayton_data.
+  clayton_hinv <- function(u, p, theta) {
+    a <- (p * u^(theta + 1))^(-theta / (theta + 1))
+    (a - u^(-theta) + 1)^(-1 / theta)
+  }
+  w0 <- pmin(pmax(runif(n), 1e-6), 1 - 1e-6)
+  w1 <- pmin(pmax(clayton_hinv(w0, runif(n), theta), 1e-6), 1 - 1e-6)
+  w2 <- pmin(pmax(clayton_hinv(w1, runif(n), theta), 1e-6), 1 - 1e-6)
+  cbind(qnorm(w0), qnorm(w1), qnorm(w2)) # arbitrary (Gaussian) marginals on top
+}
+
+test_that("evt_splice_gate selects Clayton on genuinely Clayton-tail-dependent data and defaults to a no-op", {
+  X <- make_clayton_chain_data(seed = 31)
+
+  flat <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
+                    annealing_iterations = 60L, seed = 6L)
+  expect_equal(flat$evt_splice_gate, 0)
+  expect_equal(hdcd_node_tail_family(flat, 2, 1), "none")
+  expect_true(is.na(hdcd_node_tail_theta(flat, 2, 1)))
+
+  # Isolate the splice's effect on the FIT itself via hdcd_fit_dag() on a
+  # FIXED structure (same reasoning as the corner_relief test above):
+  # evt_splice_gate is excluded from annealing (real per-node MLE cost,
+  # unlike corner_relief), so there's no need to guard against a
+  # different reference structure here, but pinning the structure keeps
+  # this test focused on exactly one thing.
+  true_structure <- hdcd_dag(flat)
+  spliced <- hdcd_fit_dag(flat, true_structure, evt_splice_gate = 0.1)
+  expect_s3_class(spliced, "hdcd_dag_fit")
+
+  found_clayton <- FALSE
+  for (node in 2:3) {
+    n_parents <- length(hdcd_node_parents(flat, node))
+    for (p in seq_len(n_parents)) {
+      family <- hdcd_node_tail_family(spliced, node, p)
+      expect_true(family %in% c("none", "clayton", "gumbel"))
+      if (family == "clayton") {
+        found_clayton <- TRUE
+        theta <- hdcd_node_tail_theta(spliced, node, p)
+        expect_true(is.numeric(theta) && !is.na(theta) && theta > 0)
+      } else if (family == "none") {
+        expect_true(is.na(hdcd_node_tail_theta(spliced, node, p)))
+      }
+    }
+  }
+  expect_true(found_clayton)
+})

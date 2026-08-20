@@ -75,13 +75,15 @@
                         seed, theta_max_iterations = 0L, theta_tol = 0,
                         lambda_roughness_grid = numeric(0), roughness_validation_fraction = 0,
                         bernstein_degree_grid = integer(0), tail_dependence_gate = 0,
-                        tail_dependence_k = 0L, corner_relief = 0) {
+                        tail_dependence_k = 0L, corner_relief = 0,
+                        evt_splice_gate = 0, evt_splice_bandwidth = 0) {
   .Call("hdcd_r_dag_fit", u, as.integer(n), as.integer(d), dag_ext,
         as.integer(bernstein_degree), as.double(lambda_roughness), as.double(holdout_fraction),
         as.integer(seed), as.integer(theta_max_iterations), as.double(theta_tol),
         as.double(lambda_roughness_grid), as.double(roughness_validation_fraction),
         as.integer(bernstein_degree_grid), as.double(tail_dependence_gate),
-        as.integer(tail_dependence_k), as.double(corner_relief))
+        as.integer(tail_dependence_k), as.double(corner_relief),
+        as.double(evt_splice_gate), as.double(evt_splice_bandwidth))
 }
 
 .dag_fit_joint_log_density <- function(dag_fit_ext, u_point) {
@@ -122,6 +124,14 @@
 
 .local_fit_max_tail_dependence <- function(dag_fit_ext, node_1idx) {
   .Call("hdcd_r_local_fit_max_tail_dependence", dag_fit_ext, as.integer(node_1idx))
+}
+
+.local_fit_tail_family <- function(dag_fit_ext, node_1idx, parent_1idx) {
+  .Call("hdcd_r_local_fit_tail_family", dag_fit_ext, as.integer(node_1idx), as.integer(parent_1idx))
+}
+
+.local_fit_tail_theta <- function(dag_fit_ext, node_1idx, parent_1idx) {
+  .Call("hdcd_r_local_fit_tail_theta", dag_fit_ext, as.integer(node_1idx), as.integer(parent_1idx))
 }
 
 .local_fit_conditional_log_density <- function(dag_fit_ext, node_1idx, u, z) {
@@ -198,6 +208,22 @@
 #'   reason to let the search and the final fit disagree on it). A FIXED
 #'   scalar for v1, not itself grid-searched. Default `0` recovers the
 #'   original uniform roughness penalty exactly.
+#' @param evt_splice_gate in `[0,1]` (see DECISIONS.md's "copula-level
+#'   EVT tail-splice" entry): the heaviest of the tail-dependence
+#'   interventions, and the only one that can represent an actual corner
+#'   SINGULARITY rather than just reshaping a bounded Bernstein tensor.
+#'   When a parent edge's tail-dependence coefficient clears this gate, a
+#'   genuine parametric Archimedean copula (Clayton for lower-tail
+#'   dependence, Gumbel for upper) is fit by MLE and blended into that
+#'   edge's raw kernel near the corner -- see
+#'   [hdcd_node_tail_family()]/[hdcd_node_tail_theta()]. Like the two
+#'   grids (and UNLIKE `corner_relief`), this is deliberately excluded
+#'   from the annealing search (real per-node MLE cost, not the
+#'   near-free reweighting `corner_relief` does) -- applies only to the
+#'   final reference-DAG fit. Default `0` disables this entirely.
+#' @param evt_splice_bandwidth corner-bump width in copula-scale units
+#'   controlling how localized the splice is; only used when
+#'   `evt_splice_gate` is positive. `0` selects a default (0.15).
 #' @return an object of class `hdcd_model`.
 #' @export
 hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
@@ -208,7 +234,8 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
                       p_add = 1.0, p_remove = 1.0, p_swap = 1.0,
                       lambda_roughness_grid = numeric(0), roughness_validation_fraction = 0,
                       bernstein_degree_grid = integer(0), tail_dependence_gate = 0,
-                      tail_dependence_k = 0L, corner_relief = 0) {
+                      tail_dependence_k = 0L, corner_relief = 0,
+                      evt_splice_gate = 0, evt_splice_bandwidth = 0) {
   X <- as.matrix(X)
   storage.mode(X) <- "double"
   n <- nrow(X)
@@ -241,7 +268,9 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
                              bernstein_degree_grid = bernstein_degree_grid,
                              tail_dependence_gate = tail_dependence_gate,
                              tail_dependence_k = tail_dependence_k,
-                             corner_relief = corner_relief)
+                             corner_relief = corner_relief,
+                             evt_splice_gate = evt_splice_gate,
+                             evt_splice_bandwidth = evt_splice_bandwidth)
 
   model <- list(
     marginals = marginals,
@@ -261,6 +290,8 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
     tail_dependence_gate = tail_dependence_gate,
     tail_dependence_k = tail_dependence_k,
     corner_relief = corner_relief,
+    evt_splice_gate = evt_splice_gate,
+    evt_splice_bandwidth = evt_splice_bandwidth,
     best_score = annealed$score,
     score_trace = annealed$score_trace,
     accepted_trace = annealed$accepted_trace,
@@ -422,7 +453,9 @@ hdcd_fit_dag <- function(model, candidate_edges,
                           bernstein_degree_grid = model$bernstein_degree_grid,
                           tail_dependence_gate = model$tail_dependence_gate,
                           tail_dependence_k = model$tail_dependence_k,
-                          corner_relief = model$corner_relief) {
+                          corner_relief = model$corner_relief,
+                          evt_splice_gate = model$evt_splice_gate,
+                          evt_splice_bandwidth = model$evt_splice_bandwidth) {
   stopifnot(inherits(model, "hdcd_model"))
   if (is.null(candidate_edges) || length(candidate_edges) == 0) {
     parents_1idx <- integer(0)
@@ -438,6 +471,8 @@ hdcd_fit_dag <- function(model, candidate_edges,
   if (is.null(tail_dependence_gate)) tail_dependence_gate <- 0
   if (is.null(tail_dependence_k)) tail_dependence_k <- 0L
   if (is.null(corner_relief)) corner_relief <- 0
+  if (is.null(evt_splice_gate)) evt_splice_gate <- 0
+  if (is.null(evt_splice_bandwidth)) evt_splice_bandwidth <- 0
   dag_ext <- .dag_from_edges(model$d, model$max_parents, parents_1idx, children_1idx)
   fit_ext <- .dag_fit_c(model$U, nrow(model$U), model$d, dag_ext,
                          model$bernstein_degree, model$lambda_roughness, model$holdout_fraction,
@@ -447,7 +482,9 @@ hdcd_fit_dag <- function(model, candidate_edges,
                          bernstein_degree_grid = bernstein_degree_grid,
                          tail_dependence_gate = tail_dependence_gate,
                          tail_dependence_k = tail_dependence_k,
-                         corner_relief = corner_relief)
+                         corner_relief = corner_relief,
+                         evt_splice_gate = evt_splice_gate,
+                         evt_splice_bandwidth = evt_splice_bandwidth)
   structure(list(dag = dag_ext, dag_fit = fit_ext), class = "hdcd_dag_fit")
 }
 
@@ -529,6 +566,38 @@ hdcd_node_bernstein_degree <- function(model, node) {
 hdcd_node_tail_dependence <- function(model, node) {
   stopifnot(inherits(model, "hdcd_model") || inherits(model, "hdcd_dag_fit"))
   .local_fit_max_tail_dependence(model$dag_fit, node)
+}
+
+#' The parametric family spliced onto one parent edge (spec-adjacent,
+#' see DECISIONS.md's "copula-level EVT tail-splice" entry)
+#'
+#' `"none"` if `evt_splice_gate` was never supplied, or that edge's
+#' tail-dependence coefficient did not clear the gate.
+#'
+#' @param model an `hdcd_model` (or the result of [hdcd_fit_dag()]).
+#' @param node the 1-indexed column index of the node.
+#' @param parent the 1-indexed position within [hdcd_node_parents()]'s
+#'   order (NOT a global column index).
+#' @return one of `"none"`, `"clayton"`, `"gumbel"`.
+#' @export
+hdcd_node_tail_family <- function(model, node, parent) {
+  stopifnot(inherits(model, "hdcd_model") || inherits(model, "hdcd_dag_fit"))
+  .local_fit_tail_family(model$dag_fit, node, parent)
+}
+
+#' The fitted parametric theta for one spliced parent edge
+#'
+#' `NA` if that edge has no active splice ([hdcd_node_tail_family()]
+#' returns `"none"`).
+#'
+#' @param model an `hdcd_model` (or the result of [hdcd_fit_dag()]).
+#' @param node the 1-indexed column index of the node.
+#' @param parent the 1-indexed position within [hdcd_node_parents()]'s order.
+#' @return a single number.
+#' @export
+hdcd_node_tail_theta <- function(model, node, parent) {
+  stopifnot(inherits(model, "hdcd_model") || inherits(model, "hdcd_dag_fit"))
+  .local_fit_tail_theta(model$dag_fit, node, parent)
 }
 
 #' Conditional copula density c_j(u | z) for one node, over a grid of u

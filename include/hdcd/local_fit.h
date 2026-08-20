@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "hdcd/status.h"
 #include "hdcd/sinkhorn.h"
+#include "hdcd/parametric_tail.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -118,6 +119,56 @@ typedef struct hdcd_local_fit_options {
      * DECISIONS.md for why, and for the logged follow-up of extending
      * it to one. */
     double corner_relief;
+
+    /* Optional: a copula-level EVT tail-splice (see DECISIONS.md's
+     * "copula-level EVT tail-splice" entry) -- the heaviest of the
+     * interventions tried for the Clayton/Gumbel corner under-fit, and
+     * the only one that can represent an actual corner SINGULARITY: a
+     * degree-m Bernstein tensor is bounded at every degree and no amount
+     * of retuning `lambda_roughness`/`corner_relief`/`bernstein_degree`
+     * changes that. This blends in a genuine parametric Archimedean
+     * copula (Clayton for lower-tail dependence, Gumbel for upper --
+     * see hdcd/parametric_tail.h) near the corner instead.
+     *
+     * `evt_splice_gate = 0` (the default) disables this entirely:
+     * behavior is exactly as if these fields did not exist -- fully
+     * backward compatible.
+     *
+     * When > 0: for each parent edge, hdcd_tail_dependence_coefficient()
+     * is estimated exactly as for bernstein_degree_grid's gate (over ALL
+     * of O_j(P_j), train and holdout both -- a descriptive diagnostic,
+     * not a fitted parameter). If the larger of that edge's
+     * (lambda_upper, lambda_lower) is >= `evt_splice_gate`, a Clayton
+     * (lambda_lower larger) or Gumbel (lambda_upper larger) copula is
+     * fit by full-sample MLE (hdcd_tail_family_fit) on that edge's TRAIN
+     * rows ONCE per node -- independent of, and computed before, any
+     * lambda_roughness_grid/bernstein_degree_grid search, since the
+     * parametric fit does not depend on Theta's own degree/lambda and
+     * would otherwise be uselessly refit identically for every grid
+     * candidate. That edge's raw kernel then becomes a per-(u,z) BLEND
+     * of the Bernstein tensor term and the parametric density (see
+     * DECISIONS.md for the exact blending weight and why it needs no
+     * hand-enforced continuity: hdcd_sinkhorn_fit already turns any
+     * positive raw kernel into a valid copula-preserving density,
+     * blended or not). Gated-out edges (below the gate, or when the grid
+     * is empty) use the plain Bernstein kernel unmodified, at zero extra
+     * cost.
+     *
+     * UNLIKE `corner_relief`, this is deliberately excluded from
+     * hdcd_run_annealing, the same way lambda_roughness_grid/
+     * bernstein_degree_grid are (spec section 18): a per-node tail-
+     * dependence-coefficient estimate plus a golden-section MLE fit is
+     * real, non-negligible per-node cost (unlike corner_relief's cheap
+     * weight computation), and annealing calls compute_node_score for
+     * every distinct parent set a proposal tries -- so this is meant for
+     * hdcd_dag_fit calls on an already-decided DAG (the reference DAG
+     * the annealing search converged on using the plain Bernstein
+     * kernel, or an explicit candidate DAG), where it runs once per
+     * node, not the search itself. A FIXED scalar for v1 either way
+     * (bandwidth and gate are not grid-searched), matching
+     * `corner_relief`'s v1 scope. */
+    double evt_splice_gate;      /* in [0,1]; 0 disables the splice entirely */
+    double evt_splice_bandwidth; /* corner-bump width in copula-scale units; 0 selects a default (0.15) */
 } hdcd_local_fit_options_t;
 
 /* One node's fitted conditional copula factor c_j(u_j | u_Pa(j)). */
@@ -198,6 +249,18 @@ size_t hdcd_local_fit_selected_bernstein_degree(const hdcd_local_fit_t *fit);
  * was empty/NULL (the diagnostic is not computed at all when it would
  * not be used), for a root node, or a NULL fit. */
 double hdcd_local_fit_max_tail_dependence(const hdcd_local_fit_t *fit);
+
+/* The parametric family spliced onto parent edge `parent_idx` (in
+ * hdcd_local_fit_parent_order()'s order): HDCD_TAIL_FAMILY_NONE if
+ * evt_splice_gate was 0/disabled, or that edge's tail-dependence
+ * coefficient did not clear the gate. HDCD_TAIL_FAMILY_NONE for an
+ * out-of-range parent_idx or a NULL fit. */
+hdcd_tail_family_t hdcd_local_fit_tail_family(const hdcd_local_fit_t *fit, size_t parent_idx);
+
+/* The fitted parametric theta for parent edge `parent_idx`. NAN if that
+ * edge has no active splice (hdcd_local_fit_tail_family() == NONE), for
+ * an out-of-range parent_idx, or a NULL fit. */
+double hdcd_local_fit_tail_theta(const hdcd_local_fit_t *fit, size_t parent_idx);
 
 int hdcd_local_fit_theta_converged(const hdcd_local_fit_t *fit);
 int hdcd_local_fit_sinkhorn_converged(const hdcd_local_fit_t *fit); /* 1 for a root node (nothing to converge) */

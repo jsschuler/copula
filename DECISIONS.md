@@ -1429,3 +1429,176 @@ unilaterally here. Full results:
 `notebooks/corner_relief_sweep_results.csv` (raw, all 192 rows),
 written up with plots in `notebooks/vine_copula_recovery.Rmd`'s "Does
 corner relief resolve the tradeoff, properly replicated?" section.
+
+---
+
+## Post-M12 feature — copula-level EVT tail-splice
+
+The user explicitly noted that none of the three interventions tried so
+far (`lambda_roughness` grid, `bernstein_degree` grid, `corner_relief`)
+introduce an actual parametric copula family -- all three stay purely
+nonparametric, reweighting or resizing the same Bernstein tensor. Asked
+to pursue the heaviest, most principled option logged as an alternative
+from the very first `bernstein_degree` discussion: graft a genuine
+parametric extreme-value copula onto the Bernstein bulk near each
+corner.
+
+**Family choice: Clayton (lower-tail) and Gumbel (upper-tail), the same
+two families the vine-recovery notebook's ground truth already uses.**
+Both are single-parameter Archimedean families with tail dependence and
+overall association strength governed by the same parameter, so an
+ordinary full-sample MLE already targets the tail behavior the family
+exists to capture -- no need for a separate "tail-only" data subset or a
+peaks-over-threshold-style estimator. New module
+`src/copula/parametric_tail.c` / `include/hdcd/parametric_tail.h`
+implements both densities from their standard closed forms (Gumbel's
+derived and verified by reduction to the independence copula at
+theta=1: `c=1` exactly, confirmed in `tests/test_parametric_tail.c`) and
+MLE fitting via `hdcd_golden_section_maximize` (reusing the Milestone 1
+deterministic 1D optimizer, not a new one). Tested end-to-end: exact
+closed-form h-function-inverse samplers for both families (Clayton's is
+closed-form; Gumbel's needs bisection on its conditional CDF) generate
+known-theta synthetic data, and MLE recovers the true theta on it --
+the strongest form of correctness check available short of an
+independent reference implementation.
+
+**Key architectural simplification: no hand-enforced continuity is
+needed, because Sinkhorn normalization already provides it.** Spec
+section 3's marginal EVT splice needs explicit CDF-continuity
+enforcement at each 1D threshold because nothing else guarantees the
+spliced result is a valid distribution. The copula case has a 2D
+"boundary" (the edge of whatever corner region is being spliced), which
+would make hand-matching continuity there real, unpleasant additional
+work -- except `hdcd_sinkhorn_fit` already exists to turn ANY positive
+raw kernel into a valid, copula-preserving conditional density (spec
+section 11), regardless of where that kernel came from or whether it is
+smooth. So instead of splicing two functions with a matched boundary,
+each edge's raw kernel becomes a continuous per-(u,z) BLEND:
+
+```
+log K_blend(u,z) = (1 - w(u,z)) * g_bernstein(u,z) + w(u,z) * log c_parametric(u,z)
+w(u,z) = exp(-(du^2 + dz^2) / (2 * bandwidth^2))
+```
+
+where `(du,dz)` is the distance from `(u,z)` to whichever corner the
+fitted family targets ((0,0) for Clayton, (1,1) for Gumbel) -- the same
+"distance-from-corner, product-of-two-1D-terms" shape as
+`corner_relief`'s `edge_proximity`, just continuous in `(u,z)` instead of
+discrete on the Theta coefficient grid, since this blends kernel VALUES
+at arbitrary evaluation points rather than reweighting a fixed penalty
+grid. `hdcd_sinkhorn_fit` is hooked up to this blended kernel completely
+unmodified -- it has no idea the raw kernel it's normalizing is itself a
+blend of two different model families. This is the single design choice
+that turned "real new-module work" (the original scoping estimate for
+this option) into a change that reuses essentially all existing
+machinery.
+
+**Theta-fitting is unaffected; only kernel EVALUATION (Sinkhorn fitting
+and final density queries) sees the blend.** The Bernstein Theta
+gradient-ascent objective (`<Theta,M> - lambda_R*R(Theta)`) still
+optimizes exactly what it always did, ignoring the parametric piece
+entirely -- `fit_theta_edge` needed no changes. The parametric family's
+theta is fit ONCE per node (on that node's outer TRAIN rows), before any
+`lambda_roughness_grid`/`bernstein_degree_grid` search, and reused
+identically across every candidate that search tries -- refitting a
+single-parameter MLE that doesn't depend on Theta's own degree/lambda,
+once per grid candidate, would be pure waste.
+
+**Gated by the same `hdcd_tail_dependence_coefficient` diagnostic as
+`bernstein_degree_grid`** (computed independently for v1 even when both
+options are active simultaneously -- a known, minor redundant-
+computation cost, not a correctness issue; `tail_dependence_k` is now
+read unconditionally in the R glue rather than only inside the degree-
+grid branch, so either feature can use a custom `k` on its own). Family
+choice per edge: Clayton if that edge's lower coefficient is the larger
+of the two, Gumbel otherwise. A hard failure from the MLE fit
+(allocation/numerical/invalid-argument) leaves that specific edge
+unspliced (`HDCD_TAIL_FAMILY_NONE`) rather than aborting the whole node
+fit -- the plain Bernstein kernel is always a safe fallback, matching
+this codebase's established "fail one part clearly, not the whole
+operation" convention.
+
+**Deliberately excluded from `hdcd_run_annealing`, unlike
+`corner_relief`.** This is the one place this feature's design diverges
+from `corner_relief`'s precedent. `corner_relief` is a near-free
+reweighting applied inside an already-running Theta fit -- cheap enough
+to apply identically in both the annealing search and the final fit
+with no real cost concern. The EVT splice is not: a per-node
+tail-dependence-coefficient estimate plus a ~100-200-iteration golden-
+section MLE fit is real, non-negligible cost, and annealing calls
+`compute_node_score` for every distinct parent set a proposal tries.
+Spec section 18's directive ("do not nest an expensive continuous
+penalty search inside every graph proposal") applies here exactly as it
+does to the two grids -- `hdcd_r_run_annealing` was NOT extended with
+`evt_splice_gate`/`evt_splice_bandwidth`; only `hdcd_r_dag_fit` was. The
+reference DAG is searched for under the plain Bernstein kernel, then the
+final fit (on that already-decided structure) is where the splice
+applies -- exactly the same "search under simple, final fit under rich"
+split `lambda_roughness_grid`/`bernstein_degree_grid` already use, for
+the same reason.
+
+**A FIXED scalar gate/bandwidth for v1**, matching every other
+intervention's v1 scope in this investigation -- not itself grid-
+searched. New accessors `hdcd_local_fit_tail_family`/
+`hdcd_local_fit_tail_theta` (per parent edge, since the splice is an
+edge-level decision, not a node-level one like `bernstein_degree`),
+exposed through the R binding as `hdcd_node_tail_family()`/
+`hdcd_node_tail_theta()` (family returned as `"none"`/`"clayton"`/
+`"gumbel"` strings, more R-idiomatic than raw enum codes). Full C test
+coverage (default is a no-op; family selection and theta recovery on
+genuine Clayton and Gumbel data; gated-off matches unspliced exactly;
+root-node triviality; invalid arguments) plus a new R test exercising
+the same properties through the public API. Python/Julia struct mirrors
+extended again (two more trailing `double` fields) and both full suites
+reverified passing (Python 9/9, Julia 32/32) -- the by-now-routine check
+for any change to this struct, per the Makefile-bug entry earlier in
+this log.
+
+**Empirical validation on the real vine-copula ground truth (d=10, n=2000,
+seed 20260819) surfaced a real, non-obvious tuning issue -- and a real
+lesson.** The initial check spliced with `evt_splice_gate=0.1`, `bandwidth=0.15`
+(the latter inherited, unjustified, from `corner_relief`'s unrelated default).
+Two problems showed up:
+
+1. `gate=0.1` was far too permissive: it spliced Clayton/Gumbel onto Frank,
+   Gaussian, and t edges with no genuine tail dependence at all (e.g. a
+   spurious Clayton splice on a Frank(3.5) edge dropped that edge's
+   shape-correlation to the true density from 0.999 to 0.953). Raising the
+   gate to `0.5` correctly suppressed every false positive -- all five
+   Frank/Gaussian/t edges in the test graph now select `"none"`, unchanged
+   from the unspliced fit.
+2. On the four edges where the true family (Clayton or Gumbel) WAS correctly
+   selected, with accurate MLE recovery (e.g. theta=2.93 vs true 3.0), the
+   splice IMPROVED shape-correlation on only one of four edges and WORSENED
+   it on the other three, at `bandwidth=0.15`. This was surprising: even
+   splicing in the objectively correct parametric family with an accurate
+   fitted parameter did not reliably help.
+
+Root cause: the blend is a weighted GEOMETRIC mean of the raw (unnormalized)
+Bernstein kernel with the already-normalized parametric copula density. A
+wide bandwidth lets the parametric term dominate well outside the actual
+corner -- into the bulk of the (u,z) square, where the Bernstein tensor
+already fits well on its own -- and the resulting scale mismatch between an
+unnormalized and a normalized term degrades the Sinkhorn-normalized fit even
+on edges where family selection was correct. Confining the splice tightly
+to the corner where the parametric family's advantage is real fixes this:
+sweeping bandwidth at the correctly-calibrated `gate=0.5` gave shape-
+correlation deltas of (bandwidth -> mean improvement across the 4 genuine
+edges): 0.15 -> mixed/negative; 0.05 -> uniformly positive
+(+0.025/+0.012/+0.016/+0.018); 0.08 -> uniformly positive and larger
+(+0.055/+0.004/+0.013/+0.029), with `Delta_KL` moving from a near-neutral
++0.04 (bandwidth 0.15, i.e. the splice was net-neutral-to-harmful relative
+to the plain fit) to a clearly favorable -0.10 (bandwidth 0.08). The default
+`evt_splice_bandwidth` (used when the R-level argument is left at 0, i.e.
+"unset") was changed from 0.15 to 0.08 in `src/optimize/local_fit.c`
+accordingly, with a comment explaining the derivation so a future reader
+does not mistake it for another `corner_relief`-inherited placeholder.
+
+**The broader lesson, consistent with this whole investigation's "genuine
+difficulties" theme: using the objectively correct parametric family with
+an accurately fitted parameter is not sufficient on its own.** How that
+correct piece is COMPOSED with the existing nonparametric machinery
+(here: a geometric blend of mismatched-scale kernels, normalized
+downstream by Sinkhorn) matters as much as getting the family and
+parameter right, and the failure mode is not visible from theta-recovery
+accuracy alone -- it only shows up in the composed, normalized fit.

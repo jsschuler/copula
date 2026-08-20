@@ -165,6 +165,11 @@ class HdcdLocalFitOptions(Structure):
         # penalty"). 0.0 (the ctypes zero default) recovers the original
         # uniform penalty exactly.
         ("corner_relief", c_double),
+        # Copula-level EVT tail-splice (see DECISIONS.md's "copula-level
+        # EVT tail-splice"). 0.0 (the ctypes zero default) disables it
+        # entirely -- the plain Bernstein kernel is used unmodified.
+        ("evt_splice_gate", c_double),
+        ("evt_splice_bandwidth", c_double),
     ]
 
 

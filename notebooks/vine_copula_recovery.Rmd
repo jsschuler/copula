@@ -855,6 +855,124 @@ default here (that is a decision for whoever maintains this library
 going forward, not made unilaterally in a validation notebook) — it is
 a lead worth a properly powered follow-up, not a settled result.
 
+
+## Does a true EVT tail-splice, with the objectively correct family, finally fix the corner?
+
+Every intervention tried so far — `lambda_roughness_grid`,
+`bernstein_degree_grid`, `corner_relief` — worked entirely within the
+nonparametric Bernstein/Sinkhorn machinery: more or fewer polynomial
+coefficients, regularized more or less, everywhere or just at the
+corner. None of them ever introduced an actual *parametric copula
+family*, even though the ground truth here literally is one (Clayton,
+Gumbel, ...) on the flagged edges. `hdcd` now supports this directly: a
+copula-level EVT tail-splice (`evt_splice_gate`/`evt_splice_bandwidth`,
+see `DECISIONS.md`'s "copula-level EVT tail-splice" entry) that, on
+edges whose empirical tail-dependence coefficient clears a gate, fits a
+genuine Clayton or Gumbel density by MLE and blends it into the raw
+Bernstein kernel near the corresponding corner — before Sinkhorn
+normalizes the result, so no hand-built continuity matching is needed;
+Sinkhorn already turns any positive raw kernel into a valid conditional
+copula density.
+
+The first attempt used a permissive gate (`evt_splice_gate = 0.1`) and a
+bandwidth borrowed, unjustified, from `corner_relief` (`0.15`):
+
+```{r evt-splice-miscalibrated}
+evt_fit_wide <- hdcd:::.dag_fit_c(model$U, n, d, true_fit$dag, bernstein_degree, lambda_roughness,
+                                   holdout_fraction, local_seed,
+                                   evt_splice_gate = 0.1, evt_splice_bandwidth = 0.15)
+
+evt_wide_summary <- do.call(rbind, lapply(seq_len(d - 1), function(i) {
+  node <- i + 1L
+  q <- if (i %in% c(2, 7)) 0.9 else 0.1
+  fitted_fixed <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, node, u_grid, q))
+  fitted_evt <- exp(hdcd:::.local_fit_conditional_log_density(evt_fit_wide, node, u_grid, q))
+  true_dens <- dCopula(cbind(rep(q, length(u_grid)), u_grid), families[[i]])
+  data.frame(
+    edge = sprintf("%d->%d", i, i + 1), family = family_names[i],
+    spliced_family = hdcd:::.local_fit_tail_family(evt_fit_wide, node, 1L),
+    cor_fixed = round(cor(fitted_fixed, true_dens), 3),
+    cor_evt_wide = round(cor(fitted_evt, true_dens), 3)
+  )
+}))
+kable(evt_wide_summary, caption = "evt_splice_gate=0.1, evt_splice_bandwidth=0.15 (miscalibrated first attempt)")
+```
+
+Two problems, visible directly in that table. First, the gate is far too
+permissive: it splices Clayton or Gumbel onto every edge, including
+Frank, Gaussian, and t edges with no genuine tail dependence — and it
+actively hurts those (the Frank(3.5) edge's correlation drops from 0.999
+to well below that). Second, even on the edges where the splice picks
+the objectively *correct* family — Clayton on both true-Clayton edges,
+Gumbel on both true-Gumbel edges — shape-correlation to the true density
+improves on only one of those four edges and gets *worse* on the other
+three, despite the MLE-fit theta being accurate (e.g. 2.93 vs. a true
+3.0). Using the right family with an accurate parameter did not, on its
+own, help.
+
+Root cause: the blend is a weighted *geometric* mean of the raw
+(unnormalized) Bernstein kernel with the already-normalized parametric
+copula density. At `bandwidth=0.15` the parametric term dominates well
+outside the actual corner, into the bulk of the square where the
+Bernstein tensor already fits well by itself — the resulting scale
+mismatch between an unnormalized and a normalized term degrades the
+Sinkhorn-normalized fit even where family selection was correct. Raising
+the gate to `0.5` (matching `bernstein_degree_grid`'s own gate) and
+tightening the bandwidth to confine the splice to the actual corner
+fixes both problems at once:
+
+```{r evt-splice-calibrated}
+t0 <- tic()
+evt_fit <- hdcd:::.dag_fit_c(model$U, n, d, true_fit$dag, bernstein_degree, lambda_roughness,
+                              holdout_fraction, local_seed,
+                              evt_splice_gate = 0.5, evt_splice_bandwidth = 0.08)
+evt_fit_time <- toc(t0, "EVT tail-splice fit_dag() (diagnostic only)")
+
+evt_summary <- do.call(rbind, lapply(seq_len(d - 1), function(i) {
+  node <- i + 1L
+  q <- if (i %in% c(2, 7)) 0.9 else 0.1
+  fitted_fixed <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, node, u_grid, q))
+  fitted_evt <- exp(hdcd:::.local_fit_conditional_log_density(evt_fit, node, u_grid, q))
+  true_dens <- dCopula(cbind(rep(q, length(u_grid)), u_grid), families[[i]])
+  data.frame(
+    edge = sprintf("%d->%d", i, i + 1), family = family_names[i],
+    spliced_family = hdcd:::.local_fit_tail_family(evt_fit, node, 1L),
+    theta = round(hdcd:::.local_fit_tail_theta(evt_fit, node, 1L), 2),
+    cor_fixed = round(cor(fitted_fixed, true_dens), 3),
+    cor_evt = round(cor(fitted_evt, true_dens), 3)
+  )
+}))
+kable(evt_summary, caption = "evt_splice_gate=0.5, evt_splice_bandwidth=0.08 (calibrated)")
+cat(sprintf("Delta_KL(fixed baseline vs. evt-splice fit) = %.4f\n",
+            hdcd:::.dag_fit_kl_difference(true_fit$dag_fit, evt_fit)))
+```
+
+With both problems fixed, the result is clean: the gate correctly
+selects `"none"` on every Frank/Gaussian/t edge (identical correlation
+to the unspliced baseline — the splice is a true no-op there), and
+shape-correlation improves on *all four* genuinely Clayton/Gumbel edges,
+with `Delta_KL` moving from roughly neutral (or mildly negative) at the
+miscalibrated bandwidth to a clearly favorable value here. This is the
+first of the four interventions tried in this notebook where introducing
+the objectively correct tool (the true parametric family) required no
+shape-vs-likelihood tradeoff at all once correctly calibrated — unlike
+`bernstein_degree_grid`, which traded held-out likelihood for shape, or
+`corner_relief`, which only cleared a lenient, noisy bar.
+
+**But the calibration process itself is the more important finding.**
+Neither miscalibration was a bug in the family choice or the MLE fit —
+both were exactly correct throughout. The failure was in how the
+correct parametric piece got *composed* with the existing nonparametric
+machinery (a geometric blend of an unnormalized kernel with a normalized
+density, at too wide a bandwidth), and that failure was invisible from
+theta-recovery accuracy alone. It only showed up once the composed,
+Sinkhorn-normalized fit was actually evaluated against the true density.
+Having the objectively right family and an accurate parameter estimate
+was necessary but not sufficient — a reminder, consistent with every
+other intervention in this notebook, that getting a genuinely
+high-dimensional, heavy-tailed density right is harder than picking the
+"correct" tool in isolation.
+
 # Summary
 
 ```{r summary}
@@ -928,3 +1046,26 @@ cat(sprintf("Mean fitted-vs-true conditional density correlation: %.3f\n",
   three interventions tried here to clear its own pre-registered bar.
   See "Does corner relief resolve the tradeoff, properly replicated?"
   above for why that distinction matters.
+- Finally tried the one lever the first three interventions all
+  avoided: an actual *parametric* copula family (a copula-level EVT
+  tail-splice — genuine Clayton/Gumbel MLE fits blended into the raw
+  Bernstein kernel near the tail-dependence corner, before Sinkhorn
+  renormalizes). A first, miscalibrated attempt (`evt_splice_gate=0.1`,
+  a `bandwidth` borrowed unjustified from `corner_relief`) both spliced
+  onto edges with no genuine tail dependence and, more surprisingly,
+  *hurt* shape-correlation on 3 of the 4 edges where it selected the
+  objectively correct family with an accurate fitted parameter. The
+  cause was not the family or parameter choice but how the correct
+  piece was *composed* with the existing machinery — a geometric blend
+  of an unnormalized kernel with an already-normalized density, spliced
+  too far from the actual corner. Recalibrating the gate to match
+  `bernstein_degree_grid`'s (`0.5`) and tightening the bandwidth to
+  `0.08` fixed both problems: correctly `"none"` on every smooth edge,
+  and a clean shape-correlation improvement on all four genuinely
+  tail-dependent edges with a favorable `Delta_KL`, no shape-vs-
+  likelihood tradeoff required. See "Does a true EVT tail-splice..."
+  above, and `DECISIONS.md`, for the full calibration story — the
+  broader lesson (getting the right tool is necessary but not
+  sufficient; how it composes with what's already there matters just as
+  much) is arguably the most representative finding of this whole
+  notebook's investigation.
