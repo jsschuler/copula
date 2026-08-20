@@ -1394,15 +1394,38 @@ sweep); it does not resolve every possible question about the far tail
 of $n$, which would need either more replicates or a purpose-built
 sequential/adaptive design.
 
-**Conclusion: `corner_relief=0.6` is a genuine, replicated improvement**
-over the plain fixed-degree baseline for tail-dependent edges, and the
-first intervention in this entire investigation (roughness grid, degree
-grid, now corner relief) to clear its own pre-registered bar rather than
-being logged as inconclusive or as a real-but-costly tradeoff. Still a
-FIXED scalar in the current implementation (see the feature entry
-above) -- turning `corner_relief=0.6` into hdcd's actual new default, or
-extending it to a searched grid, is a follow-up decision for the user,
-not made unilaterally here. Full results:
+**Correction after first writing this up: the notebook's own plot
+initially used $\pm$ SE (`sd/sqrt(12)`) error bars, not $\pm$ SD.** That
+made the four `corner_relief` lines look visually separated in a way the
+text's own z-score criterion (computed on SD, not SE) did not support --
+an inconsistency between the plot and the prose judging it, caught by
+re-inspecting the rendered plot rather than only the numbers. Fixed to
+plot $\pm 1$ SD directly, matching the z-score criterion exactly. At the
+honest scale, every `corner_relief` value's error bar overlaps every
+other value's, and every `Delta_KL` error bar overlaps zero, at every
+single $n$ -- no individual (n, corner_relief) point is distinguishable
+from any other on its own.
+
+**Conclusion, recalibrated accordingly: this is directional, weak
+evidence, not a demonstrated effect.** The actual basis for
+`corner_relief=0.6` is a *pattern in the means*, not any single
+significant comparison: it has the highest (or tied-highest) mean
+shape-correlation at all four independent $n$ draws, and its mean
+`Delta_KL` cost never exceeds 1 SD of its own spread (z-scores
+0.14-0.98) -- four-out-of-four consistent directional wins across
+independent draws is not nothing, even with zero individual points
+clearing significance, but it is meaningfully weaker than "the effect is
+visible in the plot." It is still the first intervention in this
+investigation (roughness grid, degree grid, now corner relief) to clear
+its own pre-registered bar rather than being logged as inconclusive or
+as a real-but-costly tradeoff -- "cleared a lenient bar via a
+consistent-direction argument," not "proven to work." Still a FIXED
+scalar in the current implementation (see the feature entry above) --
+turning `corner_relief=0.6` into hdcd's actual new default, extending it
+to a searched grid, or running a properly-powered follow-up (materially
+more than 6 replicates) to actually resolve individual-point
+significance are all follow-up decisions for the user, not made
+unilaterally here. Full results:
 `notebooks/corner_relief_sweep_results.csv` (raw, all 192 rows),
 written up with plots in `notebooks/vine_copula_recovery.Rmd`'s "Does
 corner relief resolve the tradeoff, properly replicated?" section.

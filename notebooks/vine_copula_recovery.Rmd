@@ -780,59 +780,80 @@ kable(cr_agg, digits = 3, row.names = FALSE,
 ```
 
 ```{r corner-relief-sweep-plot, fig.height=3.2}
+# Error bars plot +/- 1 SD, matching the z-score criterion above
+# (delta_kl_mean / delta_kl_sd) EXACTLY -- not +/- SE (sd/sqrt(12)),
+# which would make the bars ~3.5x narrower than what the pre-registered
+# "should not sit outside 1-2 SD" bar in DECISIONS.md actually judges
+# the result against, understating the real uncertainty in the plot
+# relative to the text.
 p1 <- ggplot(cr_agg, aes(n, cor_mean, color = factor(corner_relief))) +
   geom_line() +
-  geom_pointrange(aes(ymin = cor_mean - cor_sd / sqrt(12), ymax = cor_mean + cor_sd / sqrt(12))) +
+  geom_pointrange(aes(ymin = cor_mean - cor_sd, ymax = cor_mean + cor_sd)) +
   scale_x_log10() +
   theme_minimal() +
-  labs(title = "Shape-correlation to true density", subtitle = "mean +/- SE, 12 obs/cell",
+  labs(title = "Shape-correlation to true density", subtitle = "mean +/- 1 SD, 12 obs/cell",
        x = "n (log scale)", y = "correlation", color = "corner_relief")
 
 p2 <- ggplot(subset(cr_agg, corner_relief > 0), aes(n, delta_kl_mean, color = factor(corner_relief))) +
   geom_line() +
-  geom_pointrange(aes(ymin = delta_kl_mean - delta_kl_sd / sqrt(12), ymax = delta_kl_mean + delta_kl_sd / sqrt(12))) +
+  geom_pointrange(aes(ymin = delta_kl_mean - delta_kl_sd, ymax = delta_kl_mean + delta_kl_sd)) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
   scale_x_log10() +
   theme_minimal() +
-  labs(title = "Delta_KL vs. corner_relief=0 baseline", subtitle = "mean +/- SE; 0 = tied with baseline",
+  labs(title = "Delta_KL vs. corner_relief=0 baseline", subtitle = "mean +/- 1 SD; 0 = tied with baseline",
        x = "n (log scale)", y = "Delta_KL", color = "corner_relief")
 
 gridExtra::grid.arrange(p1, p2, ncol = 2)
 ```
 
-**`corner_relief = 0.6` is the standout, and it holds up under
-replication.** It improves shape-correlation at *every* $n$ tested (0.3
-and 0.8 are more mixed — 0.8 is even slightly below baseline at
-$n=2000$), and its `Delta_KL` cost, while consistently positive on
-average, never reaches even 1 replicate standard deviation at any $n$
-(z-scores 0.14–0.98) — squarely inside the "should not sit outside
-roughly 1-2 SD above 0" bar set *before* this sweep ran (see
-`DECISIONS.md`). That is a genuinely different outcome from the
-`bernstein_degree_grid` sweep two sections up: there, a single
-realization per $n$ swung non-monotonically across a much wider range
-with no way to tell signal from noise; here, replication shows a small,
-consistent shape-fit gain whose cost is not statistically distinguishable
-from zero at this sample size.
+**Look at the error bars before reading anything into the lines.** These
+are $\pm 1$ SD, matching the z-score criterion exactly (not $\pm$ SE,
+which would make the bars $\sqrt{12} \approx 3.5\times$ narrower and
+visually overstate how separated these lines really are). At that honest
+scale, every `corner_relief` value's error bar overlaps every other
+value's, and every `Delta_KL` error bar overlaps zero, at every single
+$n$. Taken one point at a time, **no individual (n, corner_relief) cell
+is distinguishable from any other** — this is not a plot where a line
+"clearly wins."
 
-One thing not to paper over: the z-score drifts upward with $n$ (0.39,
-0.14, 0.86, 0.98 across the four $n$ values) — still under 1 SD
-throughout, but trending toward it, not away from it. Six replicates is
-enough to show the earlier degree-grid "reversal at $n=16000$" story was
-mostly noise; it is not enough to rule out a genuine, slowly-growing cost
-appearing at even larger $n$ than tested here. That would need either
-more replicates at the high end or a purpose-built sequential design,
-not attempted here.
+What the plot does show, and what the pre-registered criterion was
+actually designed to detect, is a *pattern in the means* rather than any
+single significant point: `corner_relief=0.6`'s mean shape-correlation is
+the highest (or tied-highest) of the four values at all four independent
+$n$ draws, and its mean `Delta_KL` cost stays small enough, relative to
+its own spread, to never exceed 1 SD (z-scores 0.14–0.98) — a weaker,
+more honest form of evidence than "the point estimate beats baseline
+outside its error bar," but a real one: with $12$ independent
+observations per cell and substantial noise, four-out-of-four consistent
+directional wins is not what pure chance typically produces, even though
+no *individual* comparison clears significance on its own. Contrast this
+with the `bernstein_degree_grid` sweep two sections up, which had no
+replication at all — not "the effect is small relative to noise we
+measured," but literally no way to tell signal from noise, at any $n$.
+
+Two things not to paper over. First, the z-score drifts upward with $n$
+(0.39, 0.14, 0.86, 0.98) — still under 1 SD throughout, but trending
+toward it, not away from it; six replicates rules out "the degree-grid's
+$n=16000$ reversal was real," but does not rule out a genuine,
+slowly-growing `corner_relief` cost past the range tested here. Second,
+and more important given how wide these bars are: this result is
+*directional, weak evidence*, not a demonstrated effect. It would take
+materially more replicates (or a purpose-built sequential design) before
+any single `Delta_KL` estimate here could stand on its own without
+leaning on the four-way consistency argument.
 
 **Bottom line:** of the three interventions tried in this notebook for
 the Clayton/Gumbel corner under-fit — a validated `lambda_roughness`
 (ruled out: the fixed default was already near-optimal), a validated
 `bernstein_degree` (real shape gain, but a real and non-monotonic
 likelihood cost that didn't resolve with more data), and now
-`corner_relief` — this is the first one to clear its own pre-registered
-bar. `corner_relief=0.6` is not adopted as `hdcd`'s new default here
-(that is a decision for whoever maintains this library going forward,
-not made unilaterally in a validation notebook), but it is the most
-credible lead this investigation produced.
+`corner_relief` — this is the first to clear its own pre-registered bar,
+but "cleared a lenient, pre-registered bar via a consistent-direction
+argument across four noisy points" is the accurate description, not
+"proven to work." `corner_relief=0.6` is not adopted as `hdcd`'s new
+default here (that is a decision for whoever maintains this library
+going forward, not made unilaterally in a validation notebook) — it is
+a lead worth a properly powered follow-up, not a settled result.
 
 # Summary
 
@@ -898,8 +919,12 @@ cat(sprintf("Mean fitted-vs-true conditional density correlation: %.3f\n",
   cheaper, more surgical intervention: an anisotropic roughness penalty
   that relaxes smoothing specifically near the tail-dependence corner
   instead of adding coefficients everywhere. Properly replicated (6
-  seeds x 4 sample sizes), `corner_relief=0.6` improved shape-fit at
-  every $n$ tested with a held-out-likelihood cost that never reached 1
-  replicate standard deviation — the first of the three interventions
-  tried here to clear its own pre-registered bar. See "Does corner
-  relief resolve the tradeoff, properly replicated?" above.
+  seeds x 4 sample sizes, plotted with honest $\pm 1$ SD bars — not the
+  $\pm$ SE bars that would visually flatter it), `corner_relief=0.6`
+  showed the highest mean shape-correlation at every $n$ tested with a
+  held-out-likelihood cost that never exceeded 1 replicate SD — a
+  consistent-direction-across-four-noisy-points result, not any single
+  point clearing significance on its own, but still the first of the
+  three interventions tried here to clear its own pre-registered bar.
+  See "Does corner relief resolve the tradeoff, properly replicated?"
+  above for why that distinction matters.
