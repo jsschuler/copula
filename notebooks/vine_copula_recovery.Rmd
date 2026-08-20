@@ -642,6 +642,106 @@ that adds a handful of *parametric* tail-behavior parameters exactly
 where the corner is, instead of dozens more general-purpose polynomial
 coefficients everywhere.
 
+## Does more data resolve the bias-variance tradeoff?
+
+Picking up the first of those two paths directly: does growing $n$ make
+the higher-`bernstein_degree` fit actually pay off in held-out
+log-likelihood, not just in shape-correlation? We reran the exact same
+tail-dependence-gated joint (degree, lambda) search — degree in
+$\{4,6,8,10\}$, lambda in $\{0.05,0.1,0.15,0.3\}$, gate $0.05$ — against
+the same true DAG, at $n \in \{2000, 4000, 8000, 16000\}$, tracking the
+two most severely under-fit edges (1->2 Clayton, 7->8 Gumbel) plus the
+overall (all 9 edges) `Delta_KL`.
+
+This sweep is genuinely expensive — the joint search's cost grows worse
+than linearly in $n$ (19s at $n=2000$ vs. 879s at $n=16000$ for the
+9-edge search alone, on top of copula-scale data generation itself
+taking up to 84s at the largest $n$), roughly half an hour in total — so
+it was run once, standalone
+(`notebooks/n_sweep_experiment.R`, saved to `notebooks/n_sweep_results.csv`),
+rather than re-executed on every render of this notebook.
+
+```{r n-sweep-load}
+sweep_results <- read.csv("n_sweep_results.csv")
+kable(sweep_results[, c("n", "edge", "family", "selected_degree", "selected_lambda",
+                         "cor_fixed", "cor_auto", "delta_kl_total")],
+      digits = 3, row.names = FALSE,
+      caption = "Tail-dependence-gated joint search vs. sample size (one realization per n; see notebooks/n_sweep_experiment.R)")
+```
+
+```{r n-sweep-plot, fig.height=3.2}
+kl_by_n <- unique(sweep_results[, c("n", "delta_kl_total")])
+p1 <- ggplot(kl_by_n, aes(n, delta_kl_total)) +
+  geom_line() + geom_point(size = 2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  scale_x_log10() +
+  theme_minimal() +
+  labs(title = "Delta_KL(fixed vs. auto), all 9 edges", subtitle = "0 = tied; positive = fixed baseline still better",
+       x = "n (log scale)", y = "Delta_KL")
+
+cor_long <- reshape2::melt(sweep_results[, c("n", "edge", "cor_fixed", "cor_auto")],
+                            id.vars = c("n", "edge"), variable.name = "fit", value.name = "correlation")
+p2 <- ggplot(cor_long, aes(n, correlation, color = fit, linetype = edge)) +
+  geom_line() + geom_point(size = 1.5) +
+  scale_x_log10() +
+  theme_minimal() +
+  labs(title = "Shape-correlation to true density", x = "n (log scale)", y = "correlation")
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+**The first three points looked like a clean story, and then it wasn't.**
+`Delta_KL` fell from 0.252 (n=2000) to 0.203 (n=4000) to 0.099 (n=8000) —
+each doubling roughly halving the gap, exactly what "the tradeoff is a
+data-size effect" would predict, seemingly on track to cross zero
+somewhere past $n=16000$. It didn't: at $n=16000$, `Delta_KL` jumped back
+up to 0.319, worse than every smaller $n$ tested, including $n=2000$.
+
+Meanwhile the *shape*-correlation numbers stayed almost boringly stable
+across the whole sweep — `cor_auto` for 1->2 sits in a narrow 0.80-0.82
+band and `cor_auto` for 7->8 in 0.83-0.86, at every single $n$, always a
+few points above the matching `cor_fixed`. And the search picked the
+grid's most flexible option (degree 10, lambda 0.05 — literally the
+edge of the search space) every single time, at every $n$, never
+settling partway into the grid as more data arrived.
+
+**Why this is a real finding, not a wasted run.** Three things are true
+at once here, and they don't resolve into a tidy story:
+
+1. The search's own selection criterion (inner-validation score) always
+   wants maximum flexibility, at every sample size tested — the grid's
+   boundary never stopped being attractive, which on its own is a mild
+   red flag that the grid itself may be too narrow to see where the
+   optimum actually sits.
+2. Shape-correlation to the true density is a stable, small, consistent
+   win for the higher-degree fit across the whole range tested.
+3. Held-out log-likelihood — the metric that actually matters — is
+   noisy enough, and moved by enough else besides raw sample size, that
+   four points spanning an 8x range in $n$ produced a non-monotonic
+   trend with a reversal at the *largest* $n$, not the smallest.
+
+Point 3 matters most. **This sweep is a single realization per $n$, not
+a replicated design**: each $n$ draws a fresh, independent copula sample
+rather than growing one fixed dataset, so sample-to-sample variability
+in exactly which points land in which train/inner-validation/holdout
+split is completely confounded with the effect of $n$ itself. A
+1-point-per-$n$ curve cannot distinguish "the tradeoff doesn't resolve
+monotonically" from "we got an unlucky draw at $n=16000$." Properly
+separating those would need several replicate seeds at every $n$ and a
+confidence band — and at roughly 15 minutes of compute for a *single*
+$n=16000$ replicate, getting even 5 replicates there costs over an hour,
+for one edge of one synthetic experiment.
+
+That gap — between "the question is well-posed" and "answering it
+rigorously is affordable" — is itself worth sitting with. Confirming
+whether more data resolves a flexibility/generalization tradeoff in a
+high-dimensional, heavy-tailed dependence model is not just a modeling
+question; empirically *checking* the answer runs into the same
+high-dimensional, heavy-tailed cost structure the modeling problem
+started with. Logged in `DECISIONS.md` as an open question rather than
+resolved here: the honest result of this sweep is "inconclusive, and
+expensive to make conclusive," not "yes" or "no."
+
 # Summary
 
 ```{r summary}

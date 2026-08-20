@@ -1155,3 +1155,64 @@ without re-deriving them:
    node unconditionally. Simplest to implement, but does not use
    "extreme-value logic" as asked, and burns the held-out-validation
    search budget on edges (Frank, Gaussian) that gain nothing from it.
+
+---
+
+## Post-M12 finding — does more data resolve the degree/likelihood tradeoff? (open question)
+
+Requested explicitly, framed by the user as possibly the core theme of
+this whole exercise: "This paper might be about the genuine difficulties
+of high dimensional and heavy tailed modeling." Direct follow-up to the
+finding above (raising `bernstein_degree` improves shape-agreement with
+the true density but costs held-out log-likelihood at $n=2000$): does
+that gap close as $n$ grows?
+
+**Experiment**: reran the identical tail-dependence-gated joint
+(degree in $\{4,6,8,10\}$, lambda in $\{0.05,0.1,0.15,0.3\}$, gate
+$0.05$) search against the same true DAG at $n \in \{2000, 4000, 8000,
+16000\}$ (one fresh independent draw per $n$, NOT a replicated design —
+see caveat below), tracking `Delta_KL` (all 9 edges) and per-edge
+shape-correlation on the two worst offenders (1->2 Clayton, 7->8
+Gumbel). Standalone script `notebooks/n_sweep_experiment.R`, results
+saved to `notebooks/n_sweep_results.csv` and loaded (not
+recomputed) by `notebooks/vine_copula_recovery.Rmd`'s "Does more data
+resolve the bias-variance tradeoff?" section -- the sweep itself took
+roughly 30 minutes (dominated by the $n=16000$ joint search alone taking
+~880s, worse-than-linear scaling with $n$), too expensive to re-run on
+every notebook render.
+
+**Result: inconclusive, and informatively so.** `Delta_KL` fell
+0.252 -> 0.203 -> 0.099 across $n=2000,4000,8000$ (each doubling
+roughly halving the gap -- exactly the "more data helps" signature) and
+then reversed sharply to 0.319 at $n=16000$, worse than every smaller
+$n$ including 2000. Meanwhile shape-correlation to the true density
+stayed in a narrow, stable band across the entire sweep (auto beating
+fixed by roughly 0.02-0.04 at every single $n$, never trending toward or
+away from parity), and the search selected the grid's most flexible
+option (degree 10, lambda 0.05 -- the boundary of the search space)
+at every $n$ tested, never backing off as more data arrived.
+
+**Why this is being logged as an open question, not resolved either
+way.** This sweep is ONE REALIZATION PER $n$: each $n$ draws an
+independent fresh copula sample rather than growing one fixed dataset,
+so sample-to-sample variation in exactly which points land in which
+train/inner-validation/holdout split is fully confounded with the
+effect of $n$ itself. A single point per $n$ cannot distinguish "the
+tradeoff doesn't resolve monotonically (or needs far more data than
+tested)" from "the $n=16000$ draw was unlucky." Resolving that requires
+several replicate seeds per $n$ with a confidence band -- and at ~15
+minutes of compute for a single $n=16000$ replicate, even 5 replicates
+there costs over an hour, for one synthetic experiment's one pair of
+edges.
+
+**That gap is itself the finding worth keeping.** The question "does
+more data fix this" is well-posed; affordably *answering* it rigorously
+runs into the same high-dimensional, heavy-tailed cost structure the
+original modeling difficulty came from (super-linear-in-$n$ fitting
+cost, high-variance held-out estimates that need replication to trust).
+If this becomes a paper: the honest empirical claim from this sweep is
+"inconclusive, and expensive to make conclusive," which is a legitimate
+and arguably more interesting result than a clean crossover would have
+been. Follow-up, not done here: a properly replicated sweep (multiple
+seeds per $n$, mean +/- CI) restricted to fewer $n$ points and/or a
+smaller search grid to keep total compute bounded.
