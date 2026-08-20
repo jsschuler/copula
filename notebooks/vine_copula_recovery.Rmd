@@ -947,31 +947,84 @@ cat(sprintf("Delta_KL(fixed baseline vs. evt-splice fit) = %.4f\n",
             hdcd:::.dag_fit_kl_difference(true_fit$dag_fit, evt_fit)))
 ```
 
-With both problems fixed, the result is clean: the gate correctly
-selects `"none"` on every Frank/Gaussian/t edge (identical correlation
-to the unspliced baseline — the splice is a true no-op there), and
-shape-correlation improves on *all four* genuinely Clayton/Gumbel edges,
-with `Delta_KL` moving from roughly neutral (or mildly negative) at the
-miscalibrated bandwidth to a clearly favorable value here. This is the
-first of the four interventions tried in this notebook where introducing
-the objectively correct tool (the true parametric family) required no
-shape-vs-likelihood tradeoff at all once correctly calibrated — unlike
-`bernstein_degree_grid`, which traded held-out likelihood for shape, or
-`corner_relief`, which only cleared a lenient, noisy bar.
+The correlation numbers above are a summary statistic; the actual shape
+of the corner is the thing that matters. Plotting the three curves
+directly, at the same corner slice (`q`) used in the table, for the
+four genuinely tail-dependent edges:
 
-**But the calibration process itself is the more important finding.**
-Neither miscalibration was a bug in the family choice or the MLE fit —
-both were exactly correct throughout. The failure was in how the
-correct parametric piece got *composed* with the existing nonparametric
-machinery (a geometric blend of an unnormalized kernel with a normalized
-density, at too wide a bandwidth), and that failure was invisible from
-theta-recovery accuracy alone. It only showed up once the composed,
-Sinkhorn-normalized fit was actually evaluated against the true density.
-Having the objectively right family and an accurate parameter estimate
-was necessary but not sufficient — a reminder, consistent with every
-other intervention in this notebook, that getting a genuinely
-high-dimensional, heavy-tailed density right is harder than picking the
-"correct" tool in isolation.
+```{r evt-splice-density-plot, fig.height=8}
+tail_edges <- c(1, 2, 6, 7)
+evt_cond_rows <- list()
+for (i in tail_edges) {
+  node <- i + 1L
+  q <- if (i %in% c(2, 7)) 0.9 else 0.1
+  fitted_fixed <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, node, u_grid, q))
+  fitted_evt <- exp(hdcd:::.local_fit_conditional_log_density(evt_fit, node, u_grid, q))
+  true_dens <- dCopula(cbind(rep(q, length(u_grid)), u_grid), families[[i]])
+  evt_cond_rows[[length(evt_cond_rows) + 1]] <- data.frame(
+    edge = sprintf("%d->%d  %s  (z = %.1f)", i, i + 1, family_names[i], q),
+    u = u_grid,
+    density = c(true_dens, fitted_fixed, fitted_evt),
+    source = rep(c("true", "hdcd (unspliced)", "hdcd (evt-spliced)"), each = length(u_grid))
+  )
+}
+evt_cond_df <- do.call(rbind, evt_cond_rows)
+
+ggplot(evt_cond_df, aes(u, density, color = source, linetype = source)) +
+  geom_line(linewidth = 0.7) +
+  facet_wrap(~edge, scales = "free_y", ncol = 2) +
+  scale_color_manual(values = c("true" = "black", "hdcd (unspliced)" = "steelblue",
+                                 "hdcd (evt-spliced)" = "firebrick")) +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "top") +
+  labs(title = "True vs. unspliced vs. EVT-spliced conditional density at the tail-dependence corner",
+       x = expression(u[child]), y = "density")
+```
+
+**Look at the plot, not just the correlation column: this does NOT fix
+the corner.** On all four edges the red (evt-spliced) curve sits almost
+on top of the blue (unspliced) curve and nowhere close to the true
+black spike's height or sharpness. The correlation gains in the table
+(e.g. 0.767 -> 0.821 on edge 1->2) are real and directionally
+consistent, and the gate now behaves correctly — it is a true no-op
+(identical curve, identical correlation) on every Frank/Gaussian/t
+edge, and `Delta_KL` is favorable overall (-0.14) rather than the
+mixed-to-negative value the miscalibrated bandwidth produced. But
+"real and directionally consistent" is a small, precise claim, and it
+should not be read as "fixed." The under-fit documented in "Known
+limitation" above is still there, visually, on every one of these four
+panels.
+
+**That is the actual headline finding of this whole exercise, and it is
+worth stating plainly.** This intervention used the objectively correct
+parametric family (confirmed: family selection matches the true
+generator exactly on all four edges) with an accurately fitted
+parameter (e.g. theta=2.40 vs. a true 3.0, theta=3.06 vs. a true 3.0)
+— the most theoretically well-motivated of the four interventions tried
+in this notebook — and it still only nudges the fit a little. The
+tightened bandwidth (0.08) that made the splice a correct no-op
+elsewhere and avoided the earlier bandwidth's active harm also confines
+its influence to a small enough region of the (u, z) square that
+Sinkhorn's global renormalization mostly pulls the result back toward
+the smoother, Bernstein-tensor-driven shape everywhere else. Widening
+the bandwidth to let the parametric piece dominate more of the corner
+was tried first and made things *worse* on 3 of these same 4 edges (see
+above) — so this is not simply "turn the dial further" territory; the
+dial has a narrow, already-found sweet spot, and even at that sweet
+spot the visual gap to the true spike remains large.
+
+Of the four interventions attempted across this notebook —
+`lambda_roughness_grid` (ruled out entirely), `bernstein_degree_grid`
+(real shape gain, real likelihood cost), `corner_relief` (weak,
+noisy, directional evidence only), and now a true parametric EVT
+splice with the objectively correct family and an accurate fit — **none
+resolves the sharp Clayton/Gumbel corner under-fit** in a way that
+would be visually convincing to someone looking at the plot rather than
+a summary statistic. That negative result, arrived at only after
+actually building and correctly calibrating the most principled fix
+available, is a more informative finding for a paper about the genuine
+difficulties of high-dimensional, heavy-tailed modeling than a positive
+one would have been.
 
 # Summary
 
@@ -1060,12 +1113,21 @@ cat(sprintf("Mean fitted-vs-true conditional density correlation: %.3f\n",
   of an unnormalized kernel with an already-normalized density, spliced
   too far from the actual corner. Recalibrating the gate to match
   `bernstein_degree_grid`'s (`0.5`) and tightening the bandwidth to
-  `0.08` fixed both problems: correctly `"none"` on every smooth edge,
-  and a clean shape-correlation improvement on all four genuinely
-  tail-dependent edges with a favorable `Delta_KL`, no shape-vs-
-  likelihood tradeoff required. See "Does a true EVT tail-splice..."
-  above, and `DECISIONS.md`, for the full calibration story — the
-  broader lesson (getting the right tool is necessary but not
-  sufficient; how it composes with what's already there matters just as
-  much) is arguably the most representative finding of this whole
-  notebook's investigation.
+  `0.08` fixed the false-positive splicing and the active harm on the
+  genuine edges: correctly `"none"` on every smooth edge, and a small,
+  real, directionally-consistent shape-correlation improvement on all
+  four genuinely tail-dependent edges with a favorable `Delta_KL`. **But
+  plotting the actual densities — not just the correlation numbers —
+  shows this does NOT close the visual gap to the true corner spike.**
+  The spliced curve sits almost on top of the unspliced one on every
+  edge; even the objectively correct family with an accurately fitted
+  parameter, correctly gated and correctly bandwidth-tuned, only nudges
+  the fit. Of all four interventions tried in this notebook, none
+  resolves the sharp Clayton/Gumbel corner under-fit in a way that
+  would look convincing on the plot rather than in a summary statistic
+  — see "Does a true EVT tail-splice..." above, and `DECISIONS.md`, for
+  the full calibration story and the density-comparison plot. That
+  negative result, reached only after actually building and correctly
+  calibrating the most principled fix available, is arguably the most
+  representative finding of this whole notebook's investigation into
+  the genuine difficulties of high-dimensional, heavy-tailed modeling.

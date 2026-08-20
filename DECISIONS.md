@@ -1602,3 +1602,27 @@ correct piece is COMPOSED with the existing nonparametric machinery
 downstream by Sinkhorn) matters as much as getting the family and
 parameter right, and the failure mode is not visible from theta-recovery
 accuracy alone -- it only shows up in the composed, normalized fit.
+
+**Correction after actually plotting the calibrated fit (bandwidth 0.08)
+against the true density, not just its correlation number: the
+correlation gain is real but visually small, and does NOT resolve the
+under-fit.** On all four genuinely tail-dependent edges, the spliced
+curve sits almost on top of the unspliced curve and nowhere near the
+true corner spike's height or sharpness (see the notebook's "Does a true
+EVT tail-splice..." section, `evt-splice-density-plot` chunk). The
+bandwidth that avoids the earlier version's active harm and false
+positives also, necessarily, confines the splice's influence to a
+region small enough that Sinkhorn's global renormalization pulls the
+result back toward the surrounding Bernstein-driven shape almost
+everywhere -- widening the bandwidth to give the parametric piece more
+influence was the first thing tried, and it made 3 of these same 4
+edges worse. So the earlier framing above ("necessary but not
+sufficient... matters as much as getting the family and parameter
+right") undersold how large the remaining gap actually is once you look
+at the curve directly rather than a summary statistic: getting the
+family and parameter right, and correctly composing/calibrating the
+splice, together still leave the corner visually under-fit. Of the four
+interventions tried across this whole investigation, none closes that
+gap in a way that would look convincing on a plot. That is the honest
+final state of this line of investigation, not a caveat to a
+success.
