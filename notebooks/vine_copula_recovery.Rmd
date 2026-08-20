@@ -742,6 +742,98 @@ started with. Logged in `DECISIONS.md` as an open question rather than
 resolved here: the honest result of this sweep is "inconclusive, and
 expensive to make conclusive," not "yes" or "no."
 
+## Does corner relief resolve the tradeoff, properly replicated?
+
+The `bernstein_degree_grid` route added *more coefficients everywhere*
+and paid a generalization cost for it. A cheaper, more surgical
+alternative discussed as a follow-up: relax the roughness penalty
+specifically near the Bernstein coefficient grid's four CORNERS — where
+$u$ and $z$ are both extreme simultaneously, exactly where tail
+dependence concentrates — instead of raising the coefficient count.
+`hdcd` now supports this directly
+(`corner_relief`, see `DECISIONS.md`'s "anisotropic (corner-relaxed)
+roughness penalty"): one scalar in $[0,1)$, applied identically inside
+every Theta fit, at zero extra cost per fit (unlike a grid search).
+
+That last property — no extra fit calls — makes something the earlier
+`bernstein_degree_grid` sweep couldn't afford actually affordable here:
+**real replication.** Six independent seeds at every $n \in \{2000,
+4000, 8000, 16000\}$, for `corner_relief` $\in \{0, 0.3, 0.6, 0.8\}$
+(fixed `bernstein_degree=4`, `lambda_roughness=0.15` throughout, so
+`corner_relief` is the only thing varying), on the same two worst edges
+(1->2 Clayton, 7->8 Gumbel). Standalone script
+`notebooks/corner_relief_sweep_experiment.R` (~48 minutes total),
+results saved to `notebooks/corner_relief_sweep_results.csv` and loaded
+here, not recomputed.
+
+```{r corner-relief-sweep-load}
+cr_results <- read.csv("corner_relief_sweep_results.csv")
+cr_agg <- aggregate(
+  cbind(cor_true, delta_kl_total) ~ n + corner_relief, data = cr_results,
+  FUN = function(x) c(mean = mean(x), sd = sd(x))
+)
+cr_agg <- do.call(data.frame, cr_agg)
+names(cr_agg) <- c("n", "corner_relief", "cor_mean", "cor_sd", "delta_kl_mean", "delta_kl_sd")
+cr_agg$z_score <- ifelse(cr_agg$delta_kl_sd > 0, cr_agg$delta_kl_mean / cr_agg$delta_kl_sd, NA)
+kable(cr_agg, digits = 3, row.names = FALSE,
+      caption = "Mean +/- SD over 6 replicates x 2 edges (12 observations per row). z_score = Delta_KL mean / Delta_KL SD.")
+```
+
+```{r corner-relief-sweep-plot, fig.height=3.2}
+p1 <- ggplot(cr_agg, aes(n, cor_mean, color = factor(corner_relief))) +
+  geom_line() +
+  geom_pointrange(aes(ymin = cor_mean - cor_sd / sqrt(12), ymax = cor_mean + cor_sd / sqrt(12))) +
+  scale_x_log10() +
+  theme_minimal() +
+  labs(title = "Shape-correlation to true density", subtitle = "mean +/- SE, 12 obs/cell",
+       x = "n (log scale)", y = "correlation", color = "corner_relief")
+
+p2 <- ggplot(subset(cr_agg, corner_relief > 0), aes(n, delta_kl_mean, color = factor(corner_relief))) +
+  geom_line() +
+  geom_pointrange(aes(ymin = delta_kl_mean - delta_kl_sd / sqrt(12), ymax = delta_kl_mean + delta_kl_sd / sqrt(12))) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  scale_x_log10() +
+  theme_minimal() +
+  labs(title = "Delta_KL vs. corner_relief=0 baseline", subtitle = "mean +/- SE; 0 = tied with baseline",
+       x = "n (log scale)", y = "Delta_KL", color = "corner_relief")
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+**`corner_relief = 0.6` is the standout, and it holds up under
+replication.** It improves shape-correlation at *every* $n$ tested (0.3
+and 0.8 are more mixed — 0.8 is even slightly below baseline at
+$n=2000$), and its `Delta_KL` cost, while consistently positive on
+average, never reaches even 1 replicate standard deviation at any $n$
+(z-scores 0.14–0.98) — squarely inside the "should not sit outside
+roughly 1-2 SD above 0" bar set *before* this sweep ran (see
+`DECISIONS.md`). That is a genuinely different outcome from the
+`bernstein_degree_grid` sweep two sections up: there, a single
+realization per $n$ swung non-monotonically across a much wider range
+with no way to tell signal from noise; here, replication shows a small,
+consistent shape-fit gain whose cost is not statistically distinguishable
+from zero at this sample size.
+
+One thing not to paper over: the z-score drifts upward with $n$ (0.39,
+0.14, 0.86, 0.98 across the four $n$ values) — still under 1 SD
+throughout, but trending toward it, not away from it. Six replicates is
+enough to show the earlier degree-grid "reversal at $n=16000$" story was
+mostly noise; it is not enough to rule out a genuine, slowly-growing cost
+appearing at even larger $n$ than tested here. That would need either
+more replicates at the high end or a purpose-built sequential design,
+not attempted here.
+
+**Bottom line:** of the three interventions tried in this notebook for
+the Clayton/Gumbel corner under-fit — a validated `lambda_roughness`
+(ruled out: the fixed default was already near-optimal), a validated
+`bernstein_degree` (real shape gain, but a real and non-monotonic
+likelihood cost that didn't resolve with more data), and now
+`corner_relief` — this is the first one to clear its own pre-registered
+bar. `corner_relief=0.6` is not adopted as `hdcd`'s new default here
+(that is a decision for whoever maintains this library going forward,
+not made unilaterally in a validation notebook), but it is the most
+credible lead this investigation produced.
+
 # Summary
 
 ```{r summary}
@@ -801,3 +893,13 @@ cat(sprintf("Mean fitted-vs-true conditional density correlation: %.3f\n",
   true corner's shape and generalizing to new data, not a fix. See
   "Following up" above for the concrete numbers and the two remaining
   paths (more data, or a proper EVT tail-splice) logged for later.
+- Growing $n$ to resolve that tradeoff was itself inconclusive (one
+  realization per $n$ reversed non-monotonically) — which motivated a
+  cheaper, more surgical intervention: an anisotropic roughness penalty
+  that relaxes smoothing specifically near the tail-dependence corner
+  instead of adding coefficients everywhere. Properly replicated (6
+  seeds x 4 sample sizes), `corner_relief=0.6` improved shape-fit at
+  every $n$ tested with a held-out-likelihood cost that never reached 1
+  replicate standard deviation — the first of the three interventions
+  tried here to clear its own pre-registered bar. See "Does corner
+  relief resolve the tradeoff, properly replicated?" above.

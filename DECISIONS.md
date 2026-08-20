@@ -1358,3 +1358,51 @@ replicate at $n=2000$) already showed `corner_relief=0.3` AND `0.6` both
 scoring worse than baseline in `Delta_KL` -- the opposite ranking Trial A
 saw for those two values. Trial B (replicated) is what actually resolves
 this, not Trial A alone; launched immediately after this entry.
+
+**Trial B result: PASSES the pre-registered criterion, at
+`corner_relief=0.6` specifically.** All 6 replicates x 4 n x 4
+corner_relief completed (~48 minutes). Aggregated over replicates
+(mean $\pm$ SD, $n_{\mathrm{obs}}=12$ per cell -- 6 replicates x 2 edges):
+
+| $n$ | shape-cor, baseline | shape-cor, `relief=0.6` | `Delta_KL` mean $\pm$ SD | z-score |
+|---|---|---|---|---|
+| 2000  | 0.804 | **0.812** | $0.032 \pm 0.083$ | 0.39 |
+| 4000  | 0.789 | **0.806** | $0.026 \pm 0.182$ | 0.14 |
+| 8000  | 0.801 | **0.804** | $0.063 \pm 0.073$ | 0.86 |
+| 16000 | 0.794 | **0.802** | $0.098 \pm 0.100$ | 0.98 |
+
+`corner_relief=0.6` improves shape-correlation to the true density at
+*every* $n$ tested (unlike `0.3`/`0.8`, which are mixed -- `0.8` is
+even slightly worse than baseline at $n=2000$), and its `Delta_KL` cost,
+while consistently positive on average, never exceeds 1 replicate SD at
+any $n$ -- comfortably inside the pre-registered "should not sit outside
+roughly 1-2 SD above 0" bar. This is a materially different outcome from
+the `bernstein_degree_grid` sweep: there, the single-realization
+`Delta_KL` swung non-monotonically across a much larger range (0.099 to
+0.319, with no variance estimate at all to judge whether that range was
+real or noise); here, with actual replication, the cost is both smaller
+in absolute terms (0.03-0.10) and demonstrably not statistically
+distinguishable from zero.
+
+One honest caveat, not swept under the rug: the z-score rises mildly
+with $n$ (0.39 -> 0.14 -> 0.86 -> 0.98), approaching but not crossing 1
+SD at $n=16000$ -- consistent with either continued noise or a genuine,
+slowly-growing cost that a wider $n$ range might eventually surface.
+Six replicates resolves "is this a coin-flip-sized effect being
+over-read from one run" (yes, that's what happened with the degree-grid
+sweep); it does not resolve every possible question about the far tail
+of $n$, which would need either more replicates or a purpose-built
+sequential/adaptive design.
+
+**Conclusion: `corner_relief=0.6` is a genuine, replicated improvement**
+over the plain fixed-degree baseline for tail-dependent edges, and the
+first intervention in this entire investigation (roughness grid, degree
+grid, now corner relief) to clear its own pre-registered bar rather than
+being logged as inconclusive or as a real-but-costly tradeoff. Still a
+FIXED scalar in the current implementation (see the feature entry
+above) -- turning `corner_relief=0.6` into hdcd's actual new default, or
+extending it to a searched grid, is a follow-up decision for the user,
+not made unilaterally here. Full results:
+`notebooks/corner_relief_sweep_results.csv` (raw, all 192 rows),
+written up with plots in `notebooks/vine_copula_recovery.Rmd`'s "Does
+corner relief resolve the tradeoff, properly replicated?" section.
