@@ -92,6 +92,57 @@ test_that("lambda_roughness_grid selects a per-node lambda without changing defa
   }
 })
 
+make_tail_dependent_chain_data <- function(n = 800, p = 0.5, seed = 1) {
+  set.seed(seed)
+  w0 <- runif(n)
+  # A "comonotonic-mixture" copula-scale chain (see the identical
+  # construction and its derivation comment in
+  # notebooks/vine_copula_recovery.Rmd / tests/test_tail_dependence.c):
+  # with probability p, each step copies its predecessor exactly
+  # (comonotonic, contributing to both tails); otherwise independent.
+  step <- function(prev) ifelse(runif(n) < p, prev, runif(n))
+  u1 <- step(w0)
+  u2 <- step(u1)
+  cbind(qnorm(w0), qnorm(u1), qnorm(u2)) # arbitrary (Gaussian) marginals on top
+}
+
+test_that("bernstein_degree_grid is tail-dependence-gated and selects a per-node degree", {
+  X <- make_tail_dependent_chain_data(seed = 21)
+
+  fixed <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
+                     annealing_iterations = 60L, seed = 4L)
+  expect_equal(hdcd_node_bernstein_degree(fixed, 2), 4L)
+  expect_true(is.na(hdcd_node_tail_dependence(fixed, 2))) # grid never supplied -> diagnostic not computed
+
+  gated_off <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
+                         annealing_iterations = 60L, seed = 4L,
+                         bernstein_degree_grid = c(4L, 6L, 8L), tail_dependence_gate = 0.9)
+  # A gate almost nothing clears: falls back to the fixed degree exactly.
+  expect_equal(hdcd_node_bernstein_degree(gated_off, 2), 4L)
+  expect_true(hdcd_node_tail_dependence(gated_off, 2) < 0.9)
+
+  auto <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
+                    annealing_iterations = 60L, seed = 4L,
+                    bernstein_degree_grid = c(4L, 6L, 8L), tail_dependence_gate = 0.05,
+                    lambda_roughness_grid = c(0.1, 0.15, 0.3))
+  expect_s3_class(auto, "hdcd_model")
+  # Annealing is untouched by either grid: same reference structure.
+  expect_equal(hdcd_dag(fixed), hdcd_dag(auto))
+
+  for (node in 2:3) {
+    if (length(hdcd_node_parents(auto, node)) > 0) {
+      expect_true(hdcd_node_tail_dependence(auto, node) >= 0.05)
+      expect_true(hdcd_node_bernstein_degree(auto, node) %in% c(4L, 6L, 8L))
+      expect_true(hdcd_node_lambda_roughness(auto, node) %in% c(0.1, 0.15, 0.3))
+    }
+  }
+
+  # hdcd_fit_dag() defaults to reusing the model's own degree grid too.
+  candidate <- hdcd_fit_dag(auto, hdcd_dag(auto))
+  expect_s3_class(candidate, "hdcd_dag_fit")
+  expect_true(is.numeric(hdcd_score_dag(auto, candidate)))
+})
+
 test_that("hdcd_sample raises a clear error, not silently returning garbage", {
   X <- make_chain_data(n = 100, seed = 13)
   model <- hdcd_fit(X, max_parents = 2L, annealing_iterations = 30L, seed = 3L)

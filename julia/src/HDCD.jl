@@ -119,6 +119,14 @@ struct HdcdLocalFitOptions
     lambda_roughness_grid::Ptr{Cdouble}
     lambda_roughness_grid_size::Csize_t
     roughness_validation_fraction::Cdouble
+    # Optional non-global, PER-NODE learned Bernstein degree, gated by an
+    # empirical tail-dependence diagnostic (see DECISIONS.md's
+    # "tail-dependence-informed bernstein_degree selection"). Same
+    # NULL/0-size-disables-it convention as the roughness fields above.
+    bernstein_degree_grid::Ptr{Csize_t}
+    bernstein_degree_grid_size::Csize_t
+    tail_dependence_gate::Cdouble
+    tail_dependence_k::Csize_t
 end
 
 function default_local_fit_options(; bernstein_degree, lambda_roughness, holdout_fraction, seed,
@@ -128,6 +136,7 @@ function default_local_fit_options(; bernstein_degree, lambda_roughness, holdout
         UInt64(seed), Csize_t(theta_max_iterations), Cdouble(theta_tol),
         HdcdSinkhornOptions(Csize_t(0), Cdouble(0), Cint(0)),
         Ptr{Cdouble}(C_NULL), Csize_t(0), Cdouble(0),
+        Ptr{Csize_t}(C_NULL), Csize_t(0), Cdouble(0), Csize_t(0),
     )
 end
 

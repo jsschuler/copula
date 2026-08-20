@@ -63,6 +63,47 @@ typedef struct hdcd_local_fit_options {
                                             * reserved for inner grid validation; only
                                             * used when the grid is non-empty; 0 selects
                                             * a default (0.3) */
+
+    /* Optional: a non-global, PER-NODE learned Bernstein degree, gated by
+     * an empirical tail-dependence diagnostic (see hdcd/tail_dependence.h;
+     * DECISIONS.md's "tail-dependence-informed bernstein_degree
+     * selection" entry). Raising `bernstein_degree` is the natural next
+     * lever once `lambda_roughness_grid` above has been ruled out as the
+     * fix for a sharply-peaked (Archimedean tail-dependent) edge's
+     * under-fit corner -- but searching it unconditionally on every node
+     * wastes the validation budget on edges (Gaussian, Frank) that gain
+     * nothing from extra polynomial flexibility. This gates the search
+     * per node on whether the node's data actually shows tail
+     * dependence.
+     *
+     * NULL, or bernstein_degree_grid_size == 0 (the default), disables
+     * this entirely: `bernstein_degree` is used verbatim, exactly as if
+     * this field did not exist -- fully backward compatible.
+     *
+     * When non-empty: for each of the node's parent edges,
+     * hdcd_tail_dependence_coefficient() is estimated between that
+     * parent and the child over ALL of O_j(P_j) (this is a descriptive
+     * diagnostic that decides SEARCH STRATEGY, not a fitted model
+     * parameter, so unlike lambda/degree selection itself there is no
+     * leakage concern in using the full usable set, train and holdout
+     * rows both). The node's MAX coefficient across its parent edges
+     * (hdcd_local_fit_max_tail_dependence()) is compared against
+     * `tail_dependence_gate`:
+     *   - if the max coefficient is >= the gate, bernstein_degree_grid
+     *     is searched (jointly with lambda_roughness_grid, if that is
+     *     ALSO non-empty -- the full cross product of both grids; if
+     *     lambda_roughness_grid is empty, degree is searched alone with
+     *     lambda_roughness held fixed) via the SAME inner train/
+     *     validation split lambda_roughness_grid above uses;
+     *   - otherwise bernstein_degree is used verbatim for this node (the
+     *     search is skipped, at zero extra cost) even though the grid
+     *     was supplied.
+     * `tail_dependence_gate` in [0,1]; 0 (the default when the degree
+     * grid is non-empty) means "always search," i.e. no gating. */
+    const size_t *bernstein_degree_grid;
+    size_t bernstein_degree_grid_size;
+    double tail_dependence_gate;
+    size_t tail_dependence_k; /* forwarded to hdcd_tail_dependence_coefficient; 0 selects its own default */
 } hdcd_local_fit_options_t;
 
 /* One node's fitted conditional copula factor c_j(u_j | u_Pa(j)). */
@@ -129,6 +170,20 @@ double hdcd_local_fit_roughness_penalty(const hdcd_local_fit_t *fit);   /* sum_k
  * when it was not. NAN for a root node (nothing to select) or a NULL
  * fit. */
 double hdcd_local_fit_selected_lambda_roughness(const hdcd_local_fit_t *fit);
+
+/* The Bernstein degree actually used for this node's fitted Theta:
+ * options->bernstein_degree verbatim when options->bernstein_degree_grid
+ * was empty/NULL or the tail-dependence gate was not met, or the grid
+ * candidate selected by inner-validation otherwise. 0 for a root node
+ * (nothing to select) or a NULL fit. */
+size_t hdcd_local_fit_selected_bernstein_degree(const hdcd_local_fit_t *fit);
+
+/* This node's maximum empirical tail-dependence coefficient across its
+ * parent edges (the diagnostic that gated the bernstein_degree_grid
+ * search -- see hdcd_local_fit_options_t). NAN if bernstein_degree_grid
+ * was empty/NULL (the diagnostic is not computed at all when it would
+ * not be used), for a root node, or a NULL fit. */
+double hdcd_local_fit_max_tail_dependence(const hdcd_local_fit_t *fit);
 
 int hdcd_local_fit_theta_converged(const hdcd_local_fit_t *fit);
 int hdcd_local_fit_sinkhorn_converged(const hdcd_local_fit_t *fit); /* 1 for a root node (nothing to converge) */

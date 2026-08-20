@@ -12,6 +12,8 @@ export(hdcd_score_dag)
 export(hdcd_node_parents)
 export(hdcd_conditional_density)
 export(hdcd_node_lambda_roughness)
+export(hdcd_node_bernstein_degree)
+export(hdcd_node_tail_dependence)
 
 S3method(predict, hdcd_model)
 S3method(print, hdcd_model)

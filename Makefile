@@ -10,6 +10,16 @@
 
 CC ?= cc
 CFLAGS ?= -std=c99 -Wall -Wextra -Wpedantic -O2 -g -fPIC
+# -MMD -MP: emit a per-object .d file listing the headers it #includes,
+# so a header-only change (no .c file touched) correctly triggers
+# recompilation of every .c file that includes it. Without this, `make`
+# only compares each .o against its own .c file's mtime, so editing a
+# shared header (e.g. adding fields to a struct used across translation
+# units) silently leaves other objects stale -- they keep the OLD struct
+# layout while the freshly-recompiled ones use the NEW one, an ABI
+# mismatch that links and even runs, just wrong (discovered exactly this
+# way while extending hdcd_local_fit_options_t; see DECISIONS.md).
+CFLAGS += -MMD -MP
 INCLUDES := -Iinclude
 LDLIBS := -lm
 
@@ -35,6 +45,7 @@ LIB_SRCS := \
   src/copula/transform.c \
   src/dcor/dcor_exact.c \
   src/dcor/dependence_matrix.c \
+  src/dcor/tail_dependence.c \
   src/topology/union_find.c \
   src/topology/mst.c \
   src/topology/persistent_affinity.c \
@@ -104,3 +115,7 @@ test: $(TEST_BINS)
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+# Pull in the per-object header-dependency files -MMD/-MP generated above
+# (silently ignored on a first/clean build, when they don't exist yet).
+-include $(LIB_OBJS:.o=.d)

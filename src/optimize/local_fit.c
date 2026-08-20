@@ -1,6 +1,7 @@
 #include "hdcd/local_fit.h"
 #include "hdcd/bernstein.h"
 #include "hdcd/rng.h"
+#include "hdcd/tail_dependence.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -53,6 +54,7 @@ struct hdcd_local_fit {
     double holdout_score;
     double roughness_penalty;
     double selected_lambda_roughness; /* NAN for a root node */
+    double max_tail_dependence;        /* NAN unless bernstein_degree_grid was non-empty */
     int theta_converged;
 };
 
@@ -356,22 +358,34 @@ hdcd_status_t hdcd_local_fit_node(
     if (!(options->holdout_fraction > 0.0) || !(options->holdout_fraction < 1.0)) {
         return HDCD_ERROR_INVALID_ARGUMENT;
     }
-    int grid_enabled = (options->lambda_roughness_grid != NULL && options->lambda_roughness_grid_size > 0);
+    int lambda_grid_enabled = (options->lambda_roughness_grid != NULL && options->lambda_roughness_grid_size > 0);
+    int degree_grid_enabled = (options->bernstein_degree_grid != NULL && options->bernstein_degree_grid_size > 0);
     double roughness_validation_fraction = 0.3;
     if (n_parents > 0) {
-        if (grid_enabled) {
+        if (lambda_grid_enabled) {
             for (size_t i = 0; i < options->lambda_roughness_grid_size; i++) {
                 if (!(options->lambda_roughness_grid[i] > 0.0)) {
                     return HDCD_ERROR_INVALID_ARGUMENT;
                 }
             }
-            if (options->roughness_validation_fraction > 0.0) {
-                roughness_validation_fraction = options->roughness_validation_fraction;
+        } else if (!(options->lambda_roughness > 0.0)) {
+            return HDCD_ERROR_INVALID_ARGUMENT;
+        }
+        if (degree_grid_enabled) {
+            for (size_t i = 0; i < options->bernstein_degree_grid_size; i++) {
+                if (options->bernstein_degree_grid[i] < 1) {
+                    return HDCD_ERROR_INVALID_ARGUMENT;
+                }
             }
-            if (!(roughness_validation_fraction > 0.0) || !(roughness_validation_fraction < 1.0)) {
+            if (!(options->tail_dependence_gate >= 0.0) || options->tail_dependence_gate > 1.0) {
                 return HDCD_ERROR_INVALID_ARGUMENT;
             }
-        } else if (!(options->lambda_roughness > 0.0)) {
+        }
+        if ((lambda_grid_enabled || degree_grid_enabled) && options->roughness_validation_fraction > 0.0) {
+            roughness_validation_fraction = options->roughness_validation_fraction;
+        }
+        if ((lambda_grid_enabled || degree_grid_enabled)
+            && (!(roughness_validation_fraction > 0.0) || !(roughness_validation_fraction < 1.0))) {
             return HDCD_ERROR_INVALID_ARGUMENT;
         }
     }
@@ -432,6 +446,7 @@ hdcd_status_t hdcd_local_fit_node(
         fit->holdout_score = 0.0;
         fit->roughness_penalty = 0.0;
         fit->selected_lambda_roughness = NAN;
+        fit->max_tail_dependence = NAN;
         fit->theta_converged = 1;
         *out = fit;
         return HDCD_OK;
@@ -449,24 +464,94 @@ hdcd_status_t hdcd_local_fit_node(
     hdcd_rng_seed(&rng, options->seed);
     hdcd_rng_shuffle_indices(&rng, usable_rows, n_usable);
 
-    fit->m = options->bernstein_degree;
     fit->n_train = n_train;
     fit->n_holdout = n_holdout;
+    fit->max_tail_dependence = NAN;
 
     size_t theta_max_iter = (options->theta_max_iterations != 0)
                              ? options->theta_max_iterations : HDCD_LOCAL_FIT_DEFAULT_THETA_MAX_ITER;
     double theta_tol = (options->theta_tol > 0.0) ? options->theta_tol : HDCD_LOCAL_FIT_DEFAULT_THETA_TOL;
 
-    double lambda_to_use;
-    if (!grid_enabled) {
-        lambda_to_use = options->lambda_roughness;
+    /* Tail-dependence gate for bernstein_degree_grid (spec section 18-
+     * style penalty-selection philosophy, applied to degree instead of
+     * lambda; see DECISIONS.md's "tail-dependence-informed bernstein_degree
+     * selection"). A pure descriptive diagnostic over ALL usable rows
+     * (train + holdout): it decides SEARCH STRATEGY, not a fitted
+     * parameter, so there is no leakage concern in using the full set. */
+    int degree_search_active = 0;
+    if (degree_grid_enabled) {
+        double max_tail_dep = 0.0;
+        double *col_child = (double *)malloc(n_usable * sizeof(double));
+        double *col_parent = (double *)malloc(n_usable * sizeof(double));
+        if (col_child == NULL || col_parent == NULL) {
+            free(col_child);
+            free(col_parent);
+            free(usable_rows);
+            hdcd_local_fit_free(fit);
+            return HDCD_ERROR_ALLOCATION;
+        }
+        for (size_t i = 0; i < n_usable; i++) {
+            col_child[i] = u[child * n + usable_rows[i]];
+        }
+        for (size_t k = 0; k < n_parents; k++) {
+            for (size_t i = 0; i < n_usable; i++) {
+                col_parent[i] = u[parents[k] * n + usable_rows[i]];
+            }
+            double lam_upper, lam_lower;
+            hdcd_status_t td_status = hdcd_tail_dependence_coefficient(
+                col_child, col_parent, n_usable, options->tail_dependence_k, &lam_upper, &lam_lower
+            );
+            if (td_status == HDCD_OK) {
+                if (lam_upper > max_tail_dep) max_tail_dep = lam_upper;
+                if (lam_lower > max_tail_dep) max_tail_dep = lam_lower;
+            }
+            /* Not enough usable rows for even the estimator's own
+             * minimum (n_usable < 8): treated as "no tail-dependence
+             * evidence" rather than a hard failure of the whole fit. */
+        }
+        free(col_child);
+        free(col_parent);
+        fit->max_tail_dependence = max_tail_dep;
+        degree_search_active = (options->tail_dependence_gate <= 0.0) || (max_tail_dep >= options->tail_dependence_gate);
+    }
+
+    size_t degree_candidates_buf[1];
+    const size_t *degree_candidates;
+    size_t n_degree_candidates;
+    if (degree_search_active) {
+        degree_candidates = options->bernstein_degree_grid;
+        n_degree_candidates = options->bernstein_degree_grid_size;
     } else {
-        /* Select lambda_roughness PER NODE via a small validation grid
-         * (spec section 18), using an INNER split of the outer TRAIN
-         * rows only -- the outer holdout (used for hdcd_dag_fit_kl_estimate
-         * and, if this options struct reaches hdcd_run_annealing, for the
-         * annealing objective) is never touched here, so it stays an
-         * unbiased score for whatever lambda ends up selected. */
+        degree_candidates_buf[0] = options->bernstein_degree;
+        degree_candidates = degree_candidates_buf;
+        n_degree_candidates = 1;
+    }
+
+    double lambda_candidates_buf[1];
+    const double *lambda_candidates;
+    size_t n_lambda_candidates;
+    if (lambda_grid_enabled) {
+        lambda_candidates = options->lambda_roughness_grid;
+        n_lambda_candidates = options->lambda_roughness_grid_size;
+    } else {
+        lambda_candidates_buf[0] = options->lambda_roughness;
+        lambda_candidates = lambda_candidates_buf;
+        n_lambda_candidates = 1;
+    }
+
+    size_t m_to_use;
+    double lambda_to_use;
+    if (n_degree_candidates == 1 && n_lambda_candidates == 1) {
+        m_to_use = degree_candidates[0];
+        lambda_to_use = lambda_candidates[0];
+    } else {
+        /* Select (bernstein_degree, lambda_roughness) PER NODE via a
+         * small joint validation grid, using an INNER split of the
+         * outer TRAIN rows only -- the outer holdout (used for
+         * hdcd_dag_fit_kl_estimate and, if this options struct reaches
+         * hdcd_run_annealing, for the annealing objective) is never
+         * touched here, so it stays an unbiased score for whatever
+         * (degree, lambda) pair ends up selected. */
         size_t n_inner_val = (size_t)((double)n_train * roughness_validation_fraction);
         size_t n_inner_train = n_train - n_inner_val;
         if (n_inner_train < 2 || n_inner_val < 1) {
@@ -487,37 +572,42 @@ hdcd_status_t hdcd_local_fit_node(
         hdcd_rng_shuffle_indices(&inner_rng, inner_rows, n_train);
 
         double best_score = -INFINITY;
-        double best_lambda = options->lambda_roughness_grid[0];
+        size_t best_m = degree_candidates[0];
+        double best_lambda = lambda_candidates[0];
         int any_ok = 0;
-        for (size_t gi = 0; gi < options->lambda_roughness_grid_size; gi++) {
-            local_fit_candidate_t cand;
-            hdcd_status_t cstatus = fit_and_score(
-                u, n, child, parents, n_parents,
-                inner_rows, n_inner_train,
-                inner_rows + n_inner_train, n_inner_val,
-                fit->m, options->lambda_roughness_grid[gi], theta_max_iter, theta_tol,
-                &options->sinkhorn_options, &cand
-            );
-            if (cstatus == HDCD_ERROR_ALLOCATION) {
-                free(inner_rows);
-                free(usable_rows);
-                hdcd_local_fit_free(fit);
-                return HDCD_ERROR_ALLOCATION;
-            }
-            if (cstatus == HDCD_OK) {
-                any_ok = 1;
-                if (cand.score > best_score) {
-                    best_score = cand.score;
-                    best_lambda = options->lambda_roughness_grid[gi];
+        for (size_t di = 0; di < n_degree_candidates; di++) {
+            for (size_t li = 0; li < n_lambda_candidates; li++) {
+                local_fit_candidate_t cand;
+                hdcd_status_t cstatus = fit_and_score(
+                    u, n, child, parents, n_parents,
+                    inner_rows, n_inner_train,
+                    inner_rows + n_inner_train, n_inner_val,
+                    degree_candidates[di], lambda_candidates[li], theta_max_iter, theta_tol,
+                    &options->sinkhorn_options, &cand
+                );
+                if (cstatus == HDCD_ERROR_ALLOCATION) {
+                    free(inner_rows);
+                    free(usable_rows);
+                    hdcd_local_fit_free(fit);
+                    return HDCD_ERROR_ALLOCATION;
                 }
-                local_fit_candidate_release(&cand);
+                if (cstatus == HDCD_OK) {
+                    any_ok = 1;
+                    if (cand.score > best_score) {
+                        best_score = cand.score;
+                        best_m = degree_candidates[di];
+                        best_lambda = lambda_candidates[li];
+                    }
+                    local_fit_candidate_release(&cand);
+                }
+                /* cstatus == HDCD_ERROR_NUMERICAL / HDCD_ERROR_INVALID_ARGUMENT:
+                 * this candidate (degree, lambda) pair produced a
+                 * degenerate fit (e.g. the overfitting failure mode a
+                 * too-small lambda can hit -- see
+                 * notebooks/vine_copula_recovery.Rmd's roughness
+                 * sensitivity check). Skip it, nothing was allocated to
+                 * release, keep searching the rest of the grid. */
             }
-            /* cstatus == HDCD_ERROR_NUMERICAL / HDCD_ERROR_INVALID_ARGUMENT:
-             * this candidate lambda produced a degenerate fit (exactly
-             * the overfitting failure mode a too-small lambda can hit --
-             * see notebooks/vine_copula_recovery.Rmd's roughness
-             * sensitivity check). Skip it, nothing was allocated to
-             * release, keep searching the rest of the grid. */
         }
         free(inner_rows);
         if (!any_ok) {
@@ -525,14 +615,16 @@ hdcd_status_t hdcd_local_fit_node(
             hdcd_local_fit_free(fit);
             return HDCD_ERROR_NUMERICAL;
         }
+        m_to_use = best_m;
         lambda_to_use = best_lambda;
     }
+    fit->m = m_to_use;
     fit->selected_lambda_roughness = lambda_to_use;
 
     /* Final fit: Theta + Sinkhorn on the FULL train rows at the selected
-     * lambda, scored on the (untouched) outer holdout -- spec section 28
-     * steps 3-4 and section 16's held-out score, exactly as if the grid
-     * had never run. */
+     * (degree, lambda), scored on the (untouched) outer holdout -- spec
+     * section 28 steps 3-4 and section 16's held-out score, exactly as
+     * if the grid(s) had never run. */
     local_fit_candidate_t production;
     hdcd_status_t status = fit_and_score(
         u, n, child, parents, n_parents,
@@ -606,6 +698,14 @@ double hdcd_local_fit_roughness_penalty(const hdcd_local_fit_t *fit) {
 
 double hdcd_local_fit_selected_lambda_roughness(const hdcd_local_fit_t *fit) {
     return (fit != NULL) ? fit->selected_lambda_roughness : NAN;
+}
+
+size_t hdcd_local_fit_selected_bernstein_degree(const hdcd_local_fit_t *fit) {
+    return (fit != NULL) ? fit->m : 0;
+}
+
+double hdcd_local_fit_max_tail_dependence(const hdcd_local_fit_t *fit) {
+    return (fit != NULL) ? fit->max_tail_dependence : NAN;
 }
 
 int hdcd_local_fit_theta_converged(const hdcd_local_fit_t *fit) {

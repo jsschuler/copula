@@ -557,6 +557,91 @@ is a more honest, if less tidy, takeaway than the first pass reached, and
 exactly what building the feature properly (rather than assuming the fix)
 was for.
 
+## Following up: does raising bernstein_degree, done properly, help?
+
+The natural next lever, and a genuinely different question from the
+`lambda_roughness` one above: is a degree-4 centered Bernstein tensor
+just too coarse a *basis* to represent a sharp corner, independent of how
+it's regularized? `hdcd` now supports raising `bernstein_degree`
+per-node too (`bernstein_degree_grid`), gated by an empirical
+tail-dependence coefficient (a standard nonparametric EVT/copula
+estimator — see `DECISIONS.md`'s "tail-dependence-informed
+`bernstein_degree` selection") so the extra flexibility (and its cost) is
+only spent on edges that actually show tail dependence, and searched
+*jointly* with `lambda_roughness` this time — the earlier, very first
+degree check in this notebook held lambda fixed while raising degree,
+which confounded "does more basis flexibility help" with "is it
+regularized correctly for its new size."
+
+```{r degree-grid-fit}
+degree_grid <- c(4L, 6L, 8L, 10L)
+lambda_grid_2 <- c(0.05, 0.1, 0.15, 0.3)
+t0 <- tic()
+degree_fit <- hdcd:::.dag_fit_c(model$U, n, d, true_fit$dag, bernstein_degree, lambda_roughness,
+                                 holdout_fraction, local_seed,
+                                 lambda_roughness_grid = lambda_grid_2, roughness_validation_fraction = 0.3,
+                                 bernstein_degree_grid = degree_grid, tail_dependence_gate = 0.05)
+degree_fit_time <- toc(t0, "Tail-dependence-gated joint (degree, lambda) fit_dag() (diagnostic only)")
+
+degree_summary <- do.call(rbind, lapply(seq_len(d - 1), function(i) {
+  node <- i + 1L
+  q <- if (i %in% c(2, 7)) 0.9 else 0.1 # Gumbel edges: upper tail; else lower
+  fitted_fixed <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, node, u_grid, q))
+  fitted_auto <- exp(hdcd:::.local_fit_conditional_log_density(degree_fit, node, u_grid, q))
+  true_dens <- dCopula(cbind(rep(q, length(u_grid)), u_grid), families[[i]])
+  data.frame(
+    edge = sprintf("%d->%d", i, i + 1), family = family_names[i],
+    tail_dependence = round(hdcd:::.local_fit_max_tail_dependence(degree_fit, node), 3),
+    selected_degree = hdcd:::.local_fit_selected_bernstein_degree(degree_fit, node),
+    selected_lambda = hdcd:::.local_fit_selected_lambda_roughness(degree_fit, node),
+    cor_degree4_fixed = round(cor(fitted_fixed, true_dens), 3),
+    cor_degree_auto = round(cor(fitted_auto, true_dens), 3)
+  )
+}))
+kable(degree_summary, caption = sprintf(
+  "Tail-dependence-gated joint (degree in {%s}, lambda in {%s}) selection vs. the fixed degree=4/lambda=0.15 baseline",
+  paste(degree_grid, collapse = ", "), paste(lambda_grid_2, collapse = ", ")
+))
+cat(sprintf("Delta_KL(fixed baseline vs. degree-auto fit) = %.4f\n",
+            hdcd:::.dag_fit_kl_difference(true_fit$dag_fit, degree_fit)))
+```
+
+Two things happen at once, and they point in opposite directions:
+
+- **The tail-dependence diagnostic itself is doing its job.** The
+  measured coefficient is high for exactly the edges flagged visually
+  (Clayton, Gumbel) and low for the smooth ones (Frank, Gaussian) — this
+  is the same corner-concentration property being picked up
+  independently, by an estimator that has never seen a fitted density
+  curve.
+- **Shape-correlation to the true density DOES improve on the flagged
+  edges** once degree is raised jointly with a re-tuned (lighter)
+  lambda — unlike the very first, unfair degree-only check earlier in
+  this notebook. Both Clayton edges and both Gumbel edges gain several
+  points of correlation.
+- **But `Delta_KL` goes the wrong way**: the auto (higher-degree)
+  fit's *held-out log-likelihood* is measurably worse than the plain
+  degree=4/lambda=0.15 baseline, not better. A degree-10 tensor has
+  $11 \times 11 = 121$ coefficients per edge instead of $5\times5=25$ at
+  degree 4 — roughly 5x the parameters, fit from a training set this
+  notebook never grew to match. It reproduces the true curve's *shape*
+  more closely while generalizing *worse* to new data at $n=2000$: the
+  same shape-vs-likelihood tension the `lambda_roughness` investigation
+  surfaced, now showing up again one level up, in the choice of basis
+  size.
+
+**Where this leaves the original question.** Raising `bernstein_degree`
+is not a free win either, at least not at this sample size: it can
+literally trade held-out predictive accuracy for a prettier picture of a
+density nobody could observe in a real (non-synthetic) application. Two
+honest paths forward, both logged in `DECISIONS.md` rather than picked
+here: grow $n$ until the extra flexibility pays for itself (this
+notebook fixes $n=2000$ throughout — a genuinely separate experiment),
+or reach for the heavier, more targeted fix — a true EVT tail-splice
+that adds a handful of *parametric* tail-behavior parameters exactly
+where the corner is, instead of dozens more general-purpose polynomial
+coefficients everywhere.
+
 # Summary
 
 ```{r summary}
@@ -607,3 +692,12 @@ cat(sprintf("Mean fitted-vs-true conditional density correlation: %.3f\n",
   holdout, fully backward compatible when unused) and was the right tool
   to properly check the hypothesis above, even though the answer it gave
   was "no" rather than the expected "yes."
+- Followed up by raising `bernstein_degree` itself (also built directly
+  in the C core, tail-dependence-gated and searched jointly with
+  `lambda_roughness`, per `DECISIONS.md`): this genuinely improves
+  shape-agreement with the true density on exactly the flagged edges, but
+  at the cost of *worse* held-out log-likelihood at this notebook's
+  sample size — a real bias-variance tradeoff between reproducing the
+  true corner's shape and generalizing to new data, not a fix. See
+  "Following up" above for the concrete numbers and the two remaining
+  paths (more data, or a proper EVT tail-splice) logged for later.

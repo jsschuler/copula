@@ -1100,3 +1100,58 @@ pointer / zero size), so neither exposes per-node roughness selection
 yet; only the R binding does. Extending Python/Julia to expose it is a
 straightforward follow-up (the C core and R binding are the reference
 implementation) but wasn't asked for here.
+
+---
+
+## Post-M12 direction — tail-dependence-informed `bernstein_degree` selection
+
+The "Known limitation" investigation above landed on: the Clayton/Gumbel
+corner under-fit is not a `lambda_roughness` problem (a properly validated
+per-node penalty confirms 0.15 was already near-optimal); it looks like a
+basis-expressivity limit of the degree-4 centered Bernstein tensor.
+Discussed three ways to raise `bernstein_degree` to test that, and picked
+one, logging all three here so the other two remain available to revisit
+without re-deriving them:
+
+1. **CHOSEN: tail-coefficient-gated joint (degree, lambda_roughness)
+   search.** Compute an empirical tail-dependence coefficient per
+   (child, parent) pair (a standard nonparametric EVT/copula estimator:
+   the fraction of the top-`k` order-statistic exceedances in one
+   variable that are also top-`k` exceedances in the other, à la Frahm/
+   Junker/Schmidt). Use each node's strongest parent-pair coefficient to
+   GATE whether that node's `bernstein_degree` is searched at all
+   (edges with no real tail dependence -- Frank, Gaussian -- skip the
+   search entirely, same architecture cost as today), and, when gated
+   in, jointly auto-select `(bernstein_degree, lambda_roughness)` via the
+   SAME held-out inner-validation split already built and proven for
+   `lambda_roughness` alone. Chosen because it reuses tested
+   infrastructure (`fit_and_score` already takes `m` as a parameter, so
+   no further core refactor is needed to vary degree per candidate), it
+   is genuinely informed by an extreme-value concept rather than a blind
+   sweep, and it fixes a real unfairness in the very first (pre-
+   correction) degree check earlier in this log, which raised degree
+   while holding `lambda_roughness` fixed at 0.15 -- an apples-to-oranges
+   comparison, since more coefficients plausibly want a different
+   regularization strength, not the same one.
+2. **NOT CHOSEN (bigger lift, revisit if (1) doesn't close the gap): a
+   true EVT tail-splice at the copula level** -- a parametric
+   extreme-value copula model grafted onto the Bernstein bulk near each
+   corner, mirroring the marginal GPD-splice architecture in spec
+   section 3 (Milestone 13) but applied to the bivariate copula density
+   instead of a univariate marginal CDF. More principled for a genuine
+   corner *singularity* a bounded polynomial can never fully reach
+   regardless of degree, but a new module: threshold selection, CDF/
+   density continuity at the splice boundary, its own test suite. Spec
+   section 3's EVT module is explicitly about MARGINAL tails (splicing
+   `F_{j,EVT}` onto each variable's own smoothed CDF) -- worth being
+   precise that this would be a NEW, copula-level EVT mechanism, not the
+   same thing as finishing Milestone 13, even though both are "extreme
+   value" ideas.
+3. **NOT CHOSEN (cheaper, revisit if tail-coefficient gating turns out to
+   add complexity without adding value): plain degree/lambda grid search
+   with no tail-dependence diagnostic at all** -- extend the existing
+   per-node auto-selection to `bernstein_degree` exactly like
+   `lambda_roughness`, letting held-out validation alone decide, on every
+   node unconditionally. Simplest to implement, but does not use
+   "extreme-value logic" as asked, and burns the held-out-validation
+   search budget on edges (Frank, Gaussian) that gain nothing from it.

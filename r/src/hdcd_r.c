@@ -305,7 +305,8 @@ SEXP hdcd_r_dag_fit(
     SEXP u, SEXP n, SEXP d, SEXP dag_ext,
     SEXP bernstein_degree, SEXP lambda_roughness, SEXP holdout_fraction, SEXP seed,
     SEXP theta_max_iterations, SEXP theta_tol,
-    SEXP lambda_roughness_grid, SEXP roughness_validation_fraction
+    SEXP lambda_roughness_grid, SEXP roughness_validation_fraction,
+    SEXP bernstein_degree_grid, SEXP tail_dependence_gate, SEXP tail_dependence_k
 ) {
     hdcd_dag_t *dag = (hdcd_dag_t *)unwrap_pointer(dag_ext, "dag");
     size_t nn = (size_t)Rf_asInteger(n);
@@ -333,9 +334,28 @@ SEXP hdcd_r_dag_fit(
         options.roughness_validation_fraction = Rf_asReal(roughness_validation_fraction);
     }
 
+    /* Optional tail-dependence-gated, non-global bernstein_degree (see
+     * DECISIONS.md's "tail-dependence-informed bernstein_degree
+     * selection"): an empty grid (R's integer(0), the default) disables
+     * this and uses `bernstein_degree` verbatim, exactly as before. */
+    size_t degree_grid_size = (size_t)Rf_xlength(bernstein_degree_grid);
+    size_t *degree_grid = NULL;
+    if (degree_grid_size > 0) {
+        int *dgp = INTEGER(bernstein_degree_grid);
+        degree_grid = (size_t *)malloc(degree_grid_size * sizeof(size_t));
+        for (size_t i = 0; i < degree_grid_size; i++) {
+            degree_grid[i] = (size_t)dgp[i];
+        }
+        options.bernstein_degree_grid = degree_grid;
+        options.bernstein_degree_grid_size = degree_grid_size;
+        options.tail_dependence_gate = Rf_asReal(tail_dependence_gate);
+        options.tail_dependence_k = (size_t)Rf_asInteger(tail_dependence_k);
+    }
+
     hdcd_dag_fit_t *fit = NULL;
     hdcd_status_t status = hdcd_dag_fit(up, mask, nn, dd, dag, &options, &fit);
     free(mask);
+    free(degree_grid);
     check_status(status, 1); /* non-convergence still returns a usable, populated fit */
 
     return wrap_pointer(fit, dag_fit_finalizer, "hdcd_dag_fit");
@@ -423,6 +443,26 @@ SEXP hdcd_r_local_fit_selected_lambda_roughness(SEXP dag_fit_ext, SEXP node_1idx
         Rf_error("invalid node index");
     }
     return Rf_ScalarReal(hdcd_local_fit_selected_lambda_roughness(node));
+}
+
+SEXP hdcd_r_local_fit_selected_bernstein_degree(SEXP dag_fit_ext, SEXP node_1idx) {
+    hdcd_dag_fit_t *fit = (hdcd_dag_fit_t *)unwrap_pointer(dag_fit_ext, "dag_fit");
+    size_t j = (size_t)(Rf_asInteger(node_1idx) - 1);
+    const hdcd_local_fit_t *node = hdcd_dag_fit_node(fit, j);
+    if (node == NULL) {
+        Rf_error("invalid node index");
+    }
+    return Rf_ScalarInteger((int)hdcd_local_fit_selected_bernstein_degree(node));
+}
+
+SEXP hdcd_r_local_fit_max_tail_dependence(SEXP dag_fit_ext, SEXP node_1idx) {
+    hdcd_dag_fit_t *fit = (hdcd_dag_fit_t *)unwrap_pointer(dag_fit_ext, "dag_fit");
+    size_t j = (size_t)(Rf_asInteger(node_1idx) - 1);
+    const hdcd_local_fit_t *node = hdcd_dag_fit_node(fit, j);
+    if (node == NULL) {
+        Rf_error("invalid node index");
+    }
+    return Rf_ScalarReal(hdcd_local_fit_max_tail_dependence(node));
 }
 
 SEXP hdcd_r_local_fit_conditional_log_density(SEXP dag_fit_ext, SEXP node_1idx, SEXP u_vec, SEXP z_vec) {
@@ -565,7 +605,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"hdcd_r_dag_add_edge", (DL_FUNC)&hdcd_r_dag_add_edge, 3},
     {"hdcd_r_dag_clone", (DL_FUNC)&hdcd_r_dag_clone, 1},
     {"hdcd_r_dag_edges", (DL_FUNC)&hdcd_r_dag_edges, 2},
-    {"hdcd_r_dag_fit", (DL_FUNC)&hdcd_r_dag_fit, 12},
+    {"hdcd_r_dag_fit", (DL_FUNC)&hdcd_r_dag_fit, 15},
     {"hdcd_r_dag_fit_joint_log_density", (DL_FUNC)&hdcd_r_dag_fit_joint_log_density, 2},
     {"hdcd_r_dag_fit_holdout_scores", (DL_FUNC)&hdcd_r_dag_fit_holdout_scores, 2},
     {"hdcd_r_dag_fit_all_converged", (DL_FUNC)&hdcd_r_dag_fit_all_converged, 1},
@@ -574,6 +614,8 @@ static const R_CallMethodDef CallEntries[] = {
     {"hdcd_r_local_fit_n_parents", (DL_FUNC)&hdcd_r_local_fit_n_parents, 2},
     {"hdcd_r_local_fit_parent_order", (DL_FUNC)&hdcd_r_local_fit_parent_order, 2},
     {"hdcd_r_local_fit_selected_lambda_roughness", (DL_FUNC)&hdcd_r_local_fit_selected_lambda_roughness, 2},
+    {"hdcd_r_local_fit_selected_bernstein_degree", (DL_FUNC)&hdcd_r_local_fit_selected_bernstein_degree, 2},
+    {"hdcd_r_local_fit_max_tail_dependence", (DL_FUNC)&hdcd_r_local_fit_max_tail_dependence, 2},
     {"hdcd_r_local_fit_conditional_log_density", (DL_FUNC)&hdcd_r_local_fit_conditional_log_density, 4},
     {"hdcd_r_run_annealing", (DL_FUNC)&hdcd_r_run_annealing, 18},
     {NULL, NULL, 0}

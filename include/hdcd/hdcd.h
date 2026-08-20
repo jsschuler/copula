@@ -26,6 +26,7 @@
 #include "hdcd/marginal.h"
 #include "hdcd/copula.h"
 #include "hdcd/dcor.h"
+#include "hdcd/tail_dependence.h"
 #include "hdcd/topology.h"
 #include "hdcd/bernstein.h"
 #include "hdcd/sinkhorn.h"

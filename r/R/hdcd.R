@@ -73,11 +73,15 @@
 
 .dag_fit_c <- function(u, n, d, dag_ext, bernstein_degree, lambda_roughness, holdout_fraction,
                         seed, theta_max_iterations = 0L, theta_tol = 0,
-                        lambda_roughness_grid = numeric(0), roughness_validation_fraction = 0) {
+                        lambda_roughness_grid = numeric(0), roughness_validation_fraction = 0,
+                        bernstein_degree_grid = integer(0), tail_dependence_gate = 0,
+                        tail_dependence_k = 0L) {
   .Call("hdcd_r_dag_fit", u, as.integer(n), as.integer(d), dag_ext,
         as.integer(bernstein_degree), as.double(lambda_roughness), as.double(holdout_fraction),
         as.integer(seed), as.integer(theta_max_iterations), as.double(theta_tol),
-        as.double(lambda_roughness_grid), as.double(roughness_validation_fraction))
+        as.double(lambda_roughness_grid), as.double(roughness_validation_fraction),
+        as.integer(bernstein_degree_grid), as.double(tail_dependence_gate),
+        as.integer(tail_dependence_k))
 }
 
 .dag_fit_joint_log_density <- function(dag_fit_ext, u_point) {
@@ -110,6 +114,14 @@
 
 .local_fit_selected_lambda_roughness <- function(dag_fit_ext, node_1idx) {
   .Call("hdcd_r_local_fit_selected_lambda_roughness", dag_fit_ext, as.integer(node_1idx))
+}
+
+.local_fit_selected_bernstein_degree <- function(dag_fit_ext, node_1idx) {
+  .Call("hdcd_r_local_fit_selected_bernstein_degree", dag_fit_ext, as.integer(node_1idx))
+}
+
+.local_fit_max_tail_dependence <- function(dag_fit_ext, node_1idx) {
+  .Call("hdcd_r_local_fit_max_tail_dependence", dag_fit_ext, as.integer(node_1idx))
 }
 
 .local_fit_conditional_log_density <- function(dag_fit_ext, node_1idx, u, z) {
@@ -155,6 +167,24 @@
 #' @param roughness_validation_fraction fraction of each node's TRAIN
 #'   rows further reserved for inner grid validation; only used when
 #'   `lambda_roughness_grid` is non-empty. `0` selects a default (0.3).
+#' @param bernstein_degree_grid optional integer vector of candidate
+#'   Bernstein degrees. When non-empty, a node's `bernstein_degree` is
+#'   raised from the fixed default via the same inner-validation
+#'   machinery as `lambda_roughness_grid` above (jointly, if that is also
+#'   supplied) -- but ONLY for nodes whose data shows real tail
+#'   dependence (see `tail_dependence_gate`); see DECISIONS.md's
+#'   "tail-dependence-informed bernstein_degree selection" and
+#'   [hdcd_node_bernstein_degree()]/[hdcd_node_tail_dependence()].
+#'   Also applies only to the final reference-DAG fit, never to the
+#'   annealing search. Default `integer(0)` disables this entirely.
+#' @param tail_dependence_gate in `[0,1]`: a node's `bernstein_degree_grid`
+#'   is only searched when its strongest parent-edge empirical
+#'   tail-dependence coefficient is at least this large; only used when
+#'   `bernstein_degree_grid` is non-empty. `0` (the default) means
+#'   "always search" -- no gating.
+#' @param tail_dependence_k number of extreme order statistics used to
+#'   estimate each tail-dependence coefficient; `0` selects a default
+#'   (`round(sqrt(n))`, clamped).
 #' @return an object of class `hdcd_model`.
 #' @export
 hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
@@ -163,7 +193,9 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
                       initial_temperature = 0.5, cooling_rate = 0.95,
                       annealing_iterations = 150L, annealing_restarts = 1L,
                       p_add = 1.0, p_remove = 1.0, p_swap = 1.0,
-                      lambda_roughness_grid = numeric(0), roughness_validation_fraction = 0) {
+                      lambda_roughness_grid = numeric(0), roughness_validation_fraction = 0,
+                      bernstein_degree_grid = integer(0), tail_dependence_gate = 0,
+                      tail_dependence_k = 0L) {
   X <- as.matrix(X)
   storage.mode(X) <- "double"
   n <- nrow(X)
@@ -192,7 +224,10 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
   dag_fit_ext <- .dag_fit_c(U, n, d, reference_dag, bernstein_degree, lambda_roughness,
                              holdout_fraction, local_seed,
                              lambda_roughness_grid = lambda_roughness_grid,
-                             roughness_validation_fraction = roughness_validation_fraction)
+                             roughness_validation_fraction = roughness_validation_fraction,
+                             bernstein_degree_grid = bernstein_degree_grid,
+                             tail_dependence_gate = tail_dependence_gate,
+                             tail_dependence_k = tail_dependence_k)
 
   model <- list(
     marginals = marginals,
@@ -208,6 +243,9 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
     local_seed = local_seed,
     lambda_roughness_grid = lambda_roughness_grid,
     roughness_validation_fraction = roughness_validation_fraction,
+    bernstein_degree_grid = bernstein_degree_grid,
+    tail_dependence_gate = tail_dependence_gate,
+    tail_dependence_k = tail_dependence_k,
     best_score = annealed$score,
     score_trace = annealed$score_trace,
     accepted_trace = annealed$accepted_trace,
@@ -352,12 +390,23 @@ hdcd_dag <- function(model) {
 #'   candidate DAG is compared on equal footing.
 #' @param roughness_validation_fraction optional override; defaults to
 #'   `model`'s own setting.
+#' @param bernstein_degree_grid optional override of the tail-dependence-
+#'   gated degree-selection grid to use for this candidate fit (see
+#'   [hdcd_fit()]); defaults to reusing whatever `model` itself was fit
+#'   with, so a candidate DAG is compared on equal footing.
+#' @param tail_dependence_gate optional override; defaults to `model`'s
+#'   own setting.
+#' @param tail_dependence_k optional override; defaults to `model`'s own
+#'   setting.
 #' @return an object of class `hdcd_dag_fit`; pass it to
 #'   [hdcd_score_dag()] to compare against `model`'s reference DAG.
 #' @export
 hdcd_fit_dag <- function(model, candidate_edges,
                           lambda_roughness_grid = model$lambda_roughness_grid,
-                          roughness_validation_fraction = model$roughness_validation_fraction) {
+                          roughness_validation_fraction = model$roughness_validation_fraction,
+                          bernstein_degree_grid = model$bernstein_degree_grid,
+                          tail_dependence_gate = model$tail_dependence_gate,
+                          tail_dependence_k = model$tail_dependence_k) {
   stopifnot(inherits(model, "hdcd_model"))
   if (is.null(candidate_edges) || length(candidate_edges) == 0) {
     parents_1idx <- integer(0)
@@ -369,12 +418,18 @@ hdcd_fit_dag <- function(model, candidate_edges,
   }
   if (is.null(lambda_roughness_grid)) lambda_roughness_grid <- numeric(0)
   if (is.null(roughness_validation_fraction)) roughness_validation_fraction <- 0
+  if (is.null(bernstein_degree_grid)) bernstein_degree_grid <- integer(0)
+  if (is.null(tail_dependence_gate)) tail_dependence_gate <- 0
+  if (is.null(tail_dependence_k)) tail_dependence_k <- 0L
   dag_ext <- .dag_from_edges(model$d, model$max_parents, parents_1idx, children_1idx)
   fit_ext <- .dag_fit_c(model$U, nrow(model$U), model$d, dag_ext,
                          model$bernstein_degree, model$lambda_roughness, model$holdout_fraction,
                          model$local_seed,
                          lambda_roughness_grid = lambda_roughness_grid,
-                         roughness_validation_fraction = roughness_validation_fraction)
+                         roughness_validation_fraction = roughness_validation_fraction,
+                         bernstein_degree_grid = bernstein_degree_grid,
+                         tail_dependence_gate = tail_dependence_gate,
+                         tail_dependence_k = tail_dependence_k)
   structure(list(dag = dag_ext, dag_fit = fit_ext), class = "hdcd_dag_fit")
 }
 
@@ -421,6 +476,41 @@ hdcd_node_parents <- function(model, node) {
 hdcd_node_lambda_roughness <- function(model, node) {
   stopifnot(inherits(model, "hdcd_model") || inherits(model, "hdcd_dag_fit"))
   .local_fit_selected_lambda_roughness(model$dag_fit, node)
+}
+
+#' The bernstein_degree actually used to fit one node's Theta
+#'
+#' Equal to `model$bernstein_degree` for every node when
+#' `bernstein_degree_grid` was not used, or gated off for that node (its
+#' tail-dependence coefficient did not clear `tail_dependence_gate`);
+#' otherwise the PER-NODE value [hdcd_fit()]'s inner-validation grid
+#' search selected (spec section 18-style selection, applied to degree
+#' instead of lambda; see DECISIONS.md). `0` for a root node.
+#'
+#' @param model an `hdcd_model` (or the result of [hdcd_fit_dag()]).
+#' @param node the 1-indexed column index of the node.
+#' @return a single integer.
+#' @export
+hdcd_node_bernstein_degree <- function(model, node) {
+  stopifnot(inherits(model, "hdcd_model") || inherits(model, "hdcd_dag_fit"))
+  .local_fit_selected_bernstein_degree(model$dag_fit, node)
+}
+
+#' One node's maximum empirical tail-dependence coefficient
+#'
+#' The diagnostic that gated [hdcd_fit()]'s `bernstein_degree_grid`
+#' search for this node: the largest tail-dependence coefficient (upper
+#' or lower) across its parent edges. `NA` if `bernstein_degree_grid` was
+#' never supplied (the diagnostic is not computed at all when it would
+#' not be used) or for a root node.
+#'
+#' @param model an `hdcd_model` (or the result of [hdcd_fit_dag()]).
+#' @param node the 1-indexed column index of the node.
+#' @return a single number in `[0,1]`, or `NA`.
+#' @export
+hdcd_node_tail_dependence <- function(model, node) {
+  stopifnot(inherits(model, "hdcd_model") || inherits(model, "hdcd_dag_fit"))
+  .local_fit_max_tail_dependence(model$dag_fit, node)
 }
 
 #' Conditional copula density c_j(u | z) for one node, over a grid of u

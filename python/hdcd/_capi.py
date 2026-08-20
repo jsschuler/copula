@@ -152,6 +152,14 @@ class HdcdLocalFitOptions(Structure):
         ("lambda_roughness_grid", POINTER(c_double)),
         ("lambda_roughness_grid_size", c_size_t),
         ("roughness_validation_fraction", c_double),
+        # Optional non-global, PER-NODE learned Bernstein degree, gated by
+        # an empirical tail-dependence diagnostic (see DECISIONS.md's
+        # "tail-dependence-informed bernstein_degree selection"). Same
+        # NULL/0-size-disables-it convention as the roughness fields above.
+        ("bernstein_degree_grid", POINTER(c_size_t)),
+        ("bernstein_degree_grid_size", c_size_t),
+        ("tail_dependence_gate", c_double),
+        ("tail_dependence_k", c_size_t),
     ]
 
 

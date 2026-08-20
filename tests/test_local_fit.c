@@ -51,6 +51,20 @@ static void make_gaussian_copula_data(size_t n, double rho, uint64_t seed, doubl
     }
 }
 
+/* A "comonotonic-mixture" copula-scale pair with an EXACTLY known,
+ * symmetric tail-dependence coefficient p (see the identical helper and
+ * its derivation comment in tests/test_tail_dependence.c): with
+ * probability p, v = u (comonotonic); otherwise v is an independent
+ * fresh uniform. */
+static void make_tail_dependent_data(size_t n, double p, uint64_t seed, double *u0, double *u1) {
+    rng_seed(seed);
+    for (size_t i = 0; i < n; i++) {
+        double w = rng_uniform();
+        u0[i] = w;
+        u1[i] = (rng_uniform() < p) ? w : rng_uniform();
+    }
+}
+
 static hdcd_local_fit_options_t default_options(uint64_t seed) {
     hdcd_local_fit_options_t opt;
     memset(&opt, 0, sizeof(opt));
@@ -329,6 +343,168 @@ static void test_roughness_grid_invalid_arguments(void) {
     HDCD_PASS("roughness grid rejects non-positive candidates, an out-of-range validation fraction, and insufficient data");
 }
 
+static void test_degree_grid_gated_off_matches_fixed_degree(void) {
+    /* A high gate (0.9) that essentially no ordinary dependency clears:
+     * the degree search must be skipped even though a grid was supplied,
+     * and the result must exactly match a plain fixed-degree fit. */
+    size_t n = 600, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_gaussian_copula_data(n, 0.6, 61, u0, u1); /* Gaussian: no tail dependence at all */
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    hdcd_local_fit_options_t fixed_opt = default_options(9);
+    size_t parent = 0;
+    hdcd_local_fit_t *fixed_fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &fixed_opt, &fixed_fit) == HDCD_OK);
+
+    hdcd_local_fit_options_t gated_opt = fixed_opt;
+    size_t degree_grid[3] = {4, 6, 8};
+    gated_opt.bernstein_degree_grid = degree_grid;
+    gated_opt.bernstein_degree_grid_size = 3;
+    gated_opt.tail_dependence_gate = 0.9;
+    hdcd_local_fit_t *gated_fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &gated_opt, &gated_fit) == HDCD_OK);
+
+    HDCD_CHECK(hdcd_local_fit_selected_bernstein_degree(gated_fit) == 4); /* unchanged: gate not met */
+    HDCD_CHECK(hdcd_local_fit_max_tail_dependence(gated_fit) < 0.9);
+    HDCD_CHECK_NEAR(hdcd_local_fit_holdout_score(gated_fit), hdcd_local_fit_holdout_score(fixed_fit), 1e-9);
+
+    hdcd_local_fit_free(fixed_fit);
+    hdcd_local_fit_free(gated_fit);
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("bernstein_degree_grid is skipped (result matches the fixed-degree fit) when the tail-dependence gate is not met");
+}
+
+static void test_degree_grid_activates_for_tail_dependent_data(void) {
+    /* Strong (p=0.6), genuinely tail-dependent data with a low gate
+     * (0.1, easily cleared): the degree search must actually run, and
+     * the diagnostic must reflect real tail dependence. */
+    size_t n = 1500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_tail_dependent_data(n, 0.6, 62, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    hdcd_local_fit_options_t opt = default_options(10);
+    size_t degree_grid[3] = {4, 6, 8};
+    opt.bernstein_degree_grid = degree_grid;
+    opt.bernstein_degree_grid_size = 3;
+    opt.tail_dependence_gate = 0.1;
+    size_t parent = 0;
+    hdcd_local_fit_t *fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &opt, &fit) == HDCD_OK);
+
+    double max_td = hdcd_local_fit_max_tail_dependence(fit);
+    HDCD_CHECK(max_td >= 0.1); /* gate cleared -- confirms the search actually ran, not just a default fallback */
+    size_t selected_degree = hdcd_local_fit_selected_bernstein_degree(fit);
+    int is_grid_member = (selected_degree == 4 || selected_degree == 6 || selected_degree == 8);
+    HDCD_CHECK(is_grid_member);
+
+    hdcd_local_fit_free(fit);
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("bernstein_degree_grid activates and selects a grid member when the tail-dependence gate is cleared");
+}
+
+static void test_joint_degree_lambda_search(void) {
+    /* Both grids supplied together: the winner must be a member of
+     * EACH respective grid, exercising the actual cross-product search. */
+    size_t n = 1500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_tail_dependent_data(n, 0.5, 63, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    hdcd_local_fit_options_t opt = default_options(11);
+    size_t degree_grid[2] = {4, 6};
+    double lambda_grid[2] = {0.15, 0.3};
+    opt.bernstein_degree_grid = degree_grid;
+    opt.bernstein_degree_grid_size = 2;
+    opt.tail_dependence_gate = 0.05;
+    opt.lambda_roughness_grid = lambda_grid;
+    opt.lambda_roughness_grid_size = 2;
+    size_t parent = 0;
+    hdcd_local_fit_t *fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &opt, &fit) == HDCD_OK);
+
+    size_t selected_degree = hdcd_local_fit_selected_bernstein_degree(fit);
+    double selected_lambda = hdcd_local_fit_selected_lambda_roughness(fit);
+    HDCD_CHECK(selected_degree == 4 || selected_degree == 6);
+    HDCD_CHECK(selected_lambda == 0.15 || selected_lambda == 0.3);
+
+    hdcd_local_fit_free(fit);
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("bernstein_degree_grid and lambda_roughness_grid together run a joint cross-product search");
+}
+
+static void test_root_node_degree_diagnostics_are_trivial(void) {
+    size_t n = 20, d = 2;
+    double u[40];
+    uint8_t mask[40];
+    for (size_t i = 0; i < 40; i++) { u[i] = 0.5; mask[i] = 1; }
+
+    hdcd_local_fit_options_t opt = default_options(1);
+    size_t degree_grid[2] = {4, 8};
+    opt.bernstein_degree_grid = degree_grid;
+    opt.bernstein_degree_grid_size = 2;
+    hdcd_local_fit_t *fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 0, NULL, 0, &opt, &fit) == HDCD_OK);
+    HDCD_CHECK(hdcd_local_fit_selected_bernstein_degree(fit) == 0);
+    HDCD_CHECK(isnan(hdcd_local_fit_max_tail_dependence(fit)));
+
+    hdcd_local_fit_free(fit);
+    HDCD_PASS("root node's degree/tail-dependence diagnostics are trivial (nothing to select or measure)");
+}
+
+static void test_degree_grid_invalid_arguments(void) {
+    size_t n = 500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_gaussian_copula_data(n, 0.5, 64, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    size_t parent = 0;
+    hdcd_local_fit_t *fit = NULL;
+
+    hdcd_local_fit_options_t bad_degree_value = default_options(1);
+    size_t degree_grid_with_zero[2] = {4, 0};
+    bad_degree_value.bernstein_degree_grid = degree_grid_with_zero;
+    bad_degree_value.bernstein_degree_grid_size = 2;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_degree_value, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    hdcd_local_fit_options_t bad_gate_low = default_options(1);
+    size_t degree_grid_ok[2] = {4, 6};
+    bad_gate_low.bernstein_degree_grid = degree_grid_ok;
+    bad_gate_low.bernstein_degree_grid_size = 2;
+    bad_gate_low.tail_dependence_gate = -0.1;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_gate_low, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    hdcd_local_fit_options_t bad_gate_high = default_options(1);
+    bad_gate_high.bernstein_degree_grid = degree_grid_ok;
+    bad_gate_high.bernstein_degree_grid_size = 2;
+    bad_gate_high.tail_dependence_gate = 1.5;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_gate_high, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("bernstein_degree_grid rejects a zero-degree candidate and an out-of-range tail_dependence_gate");
+}
+
 static void test_invalid_arguments(void) {
     size_t n = 50, d = 2;
     double u[100];
@@ -373,6 +549,11 @@ int main(void) {
     test_roughness_grid_picks_a_lighter_penalty();
     test_root_node_selected_lambda_is_nan();
     test_roughness_grid_invalid_arguments();
+    test_degree_grid_gated_off_matches_fixed_degree();
+    test_degree_grid_activates_for_tail_dependent_data();
+    test_joint_degree_lambda_search();
+    test_root_node_degree_diagnostics_are_trivial();
+    test_degree_grid_invalid_arguments();
     test_invalid_arguments();
     printf("All local_fit tests passed.\n");
     return 0;
