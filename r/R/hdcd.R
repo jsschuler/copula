@@ -75,13 +75,13 @@
                         seed, theta_max_iterations = 0L, theta_tol = 0,
                         lambda_roughness_grid = numeric(0), roughness_validation_fraction = 0,
                         bernstein_degree_grid = integer(0), tail_dependence_gate = 0,
-                        tail_dependence_k = 0L) {
+                        tail_dependence_k = 0L, corner_relief = 0) {
   .Call("hdcd_r_dag_fit", u, as.integer(n), as.integer(d), dag_ext,
         as.integer(bernstein_degree), as.double(lambda_roughness), as.double(holdout_fraction),
         as.integer(seed), as.integer(theta_max_iterations), as.double(theta_tol),
         as.double(lambda_roughness_grid), as.double(roughness_validation_fraction),
         as.integer(bernstein_degree_grid), as.double(tail_dependence_gate),
-        as.integer(tail_dependence_k))
+        as.integer(tail_dependence_k), as.double(corner_relief))
 }
 
 .dag_fit_joint_log_density <- function(dag_fit_ext, u_point) {
@@ -132,14 +132,15 @@
 .run_annealing_c <- function(u, n, d, ordering_1idx, k_max, lambda_edge,
                               bernstein_degree, lambda_roughness, holdout_fraction, local_seed,
                               initial_temperature, cooling_rate, max_iterations, restarts,
-                              p_add, p_remove, p_swap, anneal_seed) {
+                              p_add, p_remove, p_swap, anneal_seed, corner_relief = 0) {
   .Call("hdcd_r_run_annealing", u, as.integer(n), as.integer(d), as.integer(ordering_1idx),
         as.integer(k_max), as.double(lambda_edge),
         as.integer(bernstein_degree), as.double(lambda_roughness), as.double(holdout_fraction),
         as.integer(local_seed),
         as.double(initial_temperature), as.double(cooling_rate),
         as.integer(max_iterations), as.integer(restarts),
-        as.double(p_add), as.double(p_remove), as.double(p_swap), as.integer(anneal_seed))
+        as.double(p_add), as.double(p_remove), as.double(p_swap), as.integer(anneal_seed),
+        as.double(corner_relief))
 }
 
 # ---- public API -----------------------------------------------------------
@@ -185,6 +186,18 @@
 #' @param tail_dependence_k number of extreme order statistics used to
 #'   estimate each tail-dependence coefficient; `0` selects a default
 #'   (`round(sqrt(n))`, clamped).
+#' @param corner_relief anisotropic (corner-relaxed) roughness penalty
+#'   strength, in `[0, 1)` (see DECISIONS.md's "anisotropic
+#'   (corner-relaxed) roughness penalty" entry): relaxes the roughness
+#'   penalty near the four corners of each edge's Bernstein coefficient
+#'   grid -- where `u` and `z` are both extreme simultaneously, exactly
+#'   where tail dependence concentrates -- without raising
+#'   `bernstein_degree` (and its coefficient count) everywhere. Applied
+#'   to BOTH the annealing search and the final reference-DAG fit (unlike
+#'   the two grids above, it adds no extra fit calls, so there is no
+#'   reason to let the search and the final fit disagree on it). A FIXED
+#'   scalar for v1, not itself grid-searched. Default `0` recovers the
+#'   original uniform roughness penalty exactly.
 #' @return an object of class `hdcd_model`.
 #' @export
 hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
@@ -195,7 +208,7 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
                       p_add = 1.0, p_remove = 1.0, p_swap = 1.0,
                       lambda_roughness_grid = numeric(0), roughness_validation_fraction = 0,
                       bernstein_degree_grid = integer(0), tail_dependence_gate = 0,
-                      tail_dependence_k = 0L) {
+                      tail_dependence_k = 0L, corner_relief = 0) {
   X <- as.matrix(X)
   storage.mode(X) <- "double"
   n <- nrow(X)
@@ -217,7 +230,7 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
     U, n, d, ordering, max_parents, lambda_edge,
     bernstein_degree, lambda_roughness, holdout_fraction, local_seed,
     initial_temperature, cooling_rate, annealing_iterations, annealing_restarts,
-    p_add, p_remove, p_swap, seed
+    p_add, p_remove, p_swap, seed, corner_relief = corner_relief
   )
   reference_dag <- annealed$dag
 
@@ -227,7 +240,8 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
                              roughness_validation_fraction = roughness_validation_fraction,
                              bernstein_degree_grid = bernstein_degree_grid,
                              tail_dependence_gate = tail_dependence_gate,
-                             tail_dependence_k = tail_dependence_k)
+                             tail_dependence_k = tail_dependence_k,
+                             corner_relief = corner_relief)
 
   model <- list(
     marginals = marginals,
@@ -246,6 +260,7 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
     bernstein_degree_grid = bernstein_degree_grid,
     tail_dependence_gate = tail_dependence_gate,
     tail_dependence_k = tail_dependence_k,
+    corner_relief = corner_relief,
     best_score = annealed$score,
     score_trace = annealed$score_trace,
     accepted_trace = annealed$accepted_trace,
@@ -406,7 +421,8 @@ hdcd_fit_dag <- function(model, candidate_edges,
                           roughness_validation_fraction = model$roughness_validation_fraction,
                           bernstein_degree_grid = model$bernstein_degree_grid,
                           tail_dependence_gate = model$tail_dependence_gate,
-                          tail_dependence_k = model$tail_dependence_k) {
+                          tail_dependence_k = model$tail_dependence_k,
+                          corner_relief = model$corner_relief) {
   stopifnot(inherits(model, "hdcd_model"))
   if (is.null(candidate_edges) || length(candidate_edges) == 0) {
     parents_1idx <- integer(0)
@@ -421,6 +437,7 @@ hdcd_fit_dag <- function(model, candidate_edges,
   if (is.null(bernstein_degree_grid)) bernstein_degree_grid <- integer(0)
   if (is.null(tail_dependence_gate)) tail_dependence_gate <- 0
   if (is.null(tail_dependence_k)) tail_dependence_k <- 0L
+  if (is.null(corner_relief)) corner_relief <- 0
   dag_ext <- .dag_from_edges(model$d, model$max_parents, parents_1idx, children_1idx)
   fit_ext <- .dag_fit_c(model$U, nrow(model$U), model$d, dag_ext,
                          model$bernstein_degree, model$lambda_roughness, model$holdout_fraction,
@@ -429,7 +446,8 @@ hdcd_fit_dag <- function(model, candidate_edges,
                          roughness_validation_fraction = roughness_validation_fraction,
                          bernstein_degree_grid = bernstein_degree_grid,
                          tail_dependence_gate = tail_dependence_gate,
-                         tail_dependence_k = tail_dependence_k)
+                         tail_dependence_k = tail_dependence_k,
+                         corner_relief = corner_relief)
   structure(list(dag = dag_ext, dag_fit = fit_ext), class = "hdcd_dag_fit")
 }
 

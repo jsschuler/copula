@@ -505,6 +505,91 @@ static void test_degree_grid_invalid_arguments(void) {
     HDCD_PASS("bernstein_degree_grid rejects a zero-degree candidate and an out-of-range tail_dependence_gate");
 }
 
+static void test_corner_relief_default_matches_unweighted(void) {
+    /* corner_relief = 0 (the memset/default_options() default) must
+     * reproduce exactly the same fit as before this option existed. */
+    size_t n = 500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_gaussian_copula_data(n, 0.7, 71, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    hdcd_local_fit_options_t opt = default_options(31);
+    HDCD_CHECK_NEAR(opt.corner_relief, 0.0, 1e-15); /* confirms memset zeroed it, not an explicit default_options() line */
+    size_t parent = 0;
+    hdcd_local_fit_t *fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &opt, &fit) == HDCD_OK);
+    HDCD_CHECK(hdcd_local_fit_theta_converged(fit));
+
+    hdcd_local_fit_free(fit);
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("corner_relief=0 (the default) fits and converges exactly as before this option existed");
+}
+
+static void test_corner_relief_changes_the_fit(void) {
+    /* A nonzero corner_relief must actually change the fitted Theta
+     * (and therefore the holdout score / roughness penalty) on data
+     * with real tail dependence -- otherwise the option would be a
+     * silent no-op. */
+    size_t n = 1500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_tail_dependent_data(n, 0.6, 72, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    hdcd_local_fit_options_t opt_flat = default_options(32);
+    hdcd_local_fit_options_t opt_relief = default_options(32);
+    opt_relief.corner_relief = 0.8;
+    size_t parent = 0;
+
+    hdcd_local_fit_t *fit_flat = NULL;
+    hdcd_local_fit_t *fit_relief = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &opt_flat, &fit_flat) == HDCD_OK);
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &opt_relief, &fit_relief) == HDCD_OK);
+
+    HDCD_CHECK(fabs(hdcd_local_fit_holdout_score(fit_flat) - hdcd_local_fit_holdout_score(fit_relief)) > 1e-9
+               || fabs(hdcd_local_fit_roughness_penalty(fit_flat) - hdcd_local_fit_roughness_penalty(fit_relief)) > 1e-9);
+
+    hdcd_local_fit_free(fit_flat);
+    hdcd_local_fit_free(fit_relief);
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("a nonzero corner_relief measurably changes the fit on tail-dependent data");
+}
+
+static void test_corner_relief_invalid_arguments(void) {
+    size_t n = 500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_gaussian_copula_data(n, 0.5, 73, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    size_t parent = 0;
+    hdcd_local_fit_t *fit = NULL;
+
+    hdcd_local_fit_options_t bad_negative = default_options(1);
+    bad_negative.corner_relief = -0.1;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_negative, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    hdcd_local_fit_options_t bad_one = default_options(1);
+    bad_one.corner_relief = 1.0;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_one, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("corner_relief outside [0,1) is rejected");
+}
+
 static void test_invalid_arguments(void) {
     size_t n = 50, d = 2;
     double u[100];
@@ -554,6 +639,9 @@ int main(void) {
     test_joint_degree_lambda_search();
     test_root_node_degree_diagnostics_are_trivial();
     test_degree_grid_invalid_arguments();
+    test_corner_relief_default_matches_unweighted();
+    test_corner_relief_changes_the_fit();
+    test_corner_relief_invalid_arguments();
     test_invalid_arguments();
     printf("All local_fit tests passed.\n");
     return 0;

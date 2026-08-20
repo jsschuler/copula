@@ -143,6 +143,47 @@ test_that("bernstein_degree_grid is tail-dependence-gated and selects a per-node
   expect_true(is.numeric(hdcd_score_dag(auto, candidate)))
 })
 
+test_that("corner_relief changes the fit and defaults to a no-op", {
+  X <- make_tail_dependent_chain_data(seed = 22)
+
+  flat <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
+                    annealing_iterations = 60L, seed = 5L)
+  expect_equal(flat$corner_relief, 0)
+
+  # NOTE: corner_relief is applied to the annealing search too (see
+  # DECISIONS.md), unlike lambda_roughness_grid/bernstein_degree_grid
+  # which are deliberately excluded from it -- so a fresh hdcd_fit() at a
+  # different corner_relief is NOT guaranteed to find the same reference
+  # structure. Isolate the effect on the FIT itself instead: refit the
+  # SAME structure (flat's own reference DAG) via hdcd_fit_dag() at two
+  # different corner_relief values, sidestepping any structure difference.
+  true_structure <- hdcd_dag(flat)
+  candidate_flat <- hdcd_fit_dag(flat, true_structure, corner_relief = 0)
+  candidate_relief <- hdcd_fit_dag(flat, true_structure, corner_relief = 0.8)
+  expect_s3_class(candidate_flat, "hdcd_dag_fit")
+  expect_s3_class(candidate_relief, "hdcd_dag_fit")
+
+  changed <- FALSE
+  for (node in 2:3) {
+    n_parents <- hdcd_node_parents(flat, node) # same structure for both candidates
+    if (length(n_parents) > 0) {
+      u_grid <- seq(0.1, 0.9, by = 0.2)
+      z <- rep(0.5, length(n_parents)) # fixed parent value(s), reused across every u in u_grid
+      d_flat <- exp(hdcd:::.local_fit_conditional_log_density(candidate_flat$dag_fit, node, u_grid, z))
+      d_relief <- exp(hdcd:::.local_fit_conditional_log_density(candidate_relief$dag_fit, node, u_grid, z))
+      if (any(abs(d_flat - d_relief) > 1e-8)) changed <- TRUE
+    }
+  }
+  expect_true(changed)
+
+  # hdcd_fit_dag() defaults to reusing the model's own corner_relief too.
+  relief_model <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
+                            annealing_iterations = 60L, seed = 5L, corner_relief = 0.8)
+  expect_equal(relief_model$corner_relief, 0.8)
+  candidate <- hdcd_fit_dag(relief_model, hdcd_dag(relief_model))
+  expect_s3_class(candidate, "hdcd_dag_fit")
+})
+
 test_that("hdcd_sample raises a clear error, not silently returning garbage", {
   X <- make_chain_data(n = 100, seed = 13)
   model <- hdcd_fit(X, max_parents = 2L, annealing_iterations = 30L, seed = 3L)

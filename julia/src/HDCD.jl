@@ -127,6 +127,11 @@ struct HdcdLocalFitOptions
     bernstein_degree_grid_size::Csize_t
     tail_dependence_gate::Cdouble
     tail_dependence_k::Csize_t
+    # Anisotropic (corner-relaxed) roughness penalty (see DECISIONS.md's
+    # "anisotropic (corner-relaxed) roughness penalty"). 0.0 (the
+    # default_local_fit_options default below) recovers the original
+    # uniform penalty exactly.
+    corner_relief::Cdouble
 end
 
 function default_local_fit_options(; bernstein_degree, lambda_roughness, holdout_fraction, seed,
@@ -137,6 +142,7 @@ function default_local_fit_options(; bernstein_degree, lambda_roughness, holdout
         HdcdSinkhornOptions(Csize_t(0), Cdouble(0), Cint(0)),
         Ptr{Cdouble}(C_NULL), Csize_t(0), Cdouble(0),
         Ptr{Csize_t}(C_NULL), Csize_t(0), Cdouble(0), Csize_t(0),
+        Cdouble(0),
     )
 end
 

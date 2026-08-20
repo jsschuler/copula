@@ -306,7 +306,8 @@ SEXP hdcd_r_dag_fit(
     SEXP bernstein_degree, SEXP lambda_roughness, SEXP holdout_fraction, SEXP seed,
     SEXP theta_max_iterations, SEXP theta_tol,
     SEXP lambda_roughness_grid, SEXP roughness_validation_fraction,
-    SEXP bernstein_degree_grid, SEXP tail_dependence_gate, SEXP tail_dependence_k
+    SEXP bernstein_degree_grid, SEXP tail_dependence_gate, SEXP tail_dependence_k,
+    SEXP corner_relief
 ) {
     hdcd_dag_t *dag = (hdcd_dag_t *)unwrap_pointer(dag_ext, "dag");
     size_t nn = (size_t)Rf_asInteger(n);
@@ -351,6 +352,12 @@ SEXP hdcd_r_dag_fit(
         options.tail_dependence_gate = Rf_asReal(tail_dependence_gate);
         options.tail_dependence_k = (size_t)Rf_asInteger(tail_dependence_k);
     }
+
+    /* Anisotropic (corner-relaxed) roughness penalty (see DECISIONS.md's
+     * "anisotropic (corner-relaxed) roughness penalty" entry): a FIXED
+     * scalar for v1, applied to every edge fit by this call. 0 (R's
+     * default) recovers the original uniform penalty exactly. */
+    options.corner_relief = Rf_asReal(corner_relief);
 
     hdcd_dag_fit_t *fit = NULL;
     hdcd_status_t status = hdcd_dag_fit(up, mask, nn, dd, dag, &options, &fit);
@@ -505,7 +512,8 @@ SEXP hdcd_r_run_annealing(
     SEXP k_max, SEXP lambda_edge,
     SEXP bernstein_degree, SEXP lambda_roughness, SEXP holdout_fraction, SEXP local_seed,
     SEXP initial_temperature, SEXP cooling_rate, SEXP max_iterations, SEXP restarts,
-    SEXP p_add, SEXP p_remove, SEXP p_swap, SEXP anneal_seed
+    SEXP p_add, SEXP p_remove, SEXP p_swap, SEXP anneal_seed,
+    SEXP corner_relief
 ) {
     size_t nn = (size_t)Rf_asInteger(n);
     size_t dd = (size_t)Rf_asInteger(d);
@@ -524,6 +532,14 @@ SEXP hdcd_r_run_annealing(
     local_fit_options.lambda_roughness = Rf_asReal(lambda_roughness);
     local_fit_options.holdout_fraction = Rf_asReal(holdout_fraction);
     local_fit_options.seed = (uint64_t)Rf_asInteger(local_seed);
+    /* Anisotropic (corner-relaxed) roughness penalty (DECISIONS.md):
+     * applied here too, not just in hdcd_r_dag_fit, so the reference-DAG
+     * search and the final fit are scored under the SAME roughness
+     * measure -- unlike lambda_roughness_grid/bernstein_degree_grid
+     * (deliberately excluded from annealing for cost reasons, spec
+     * section 18), corner_relief adds no extra fit calls, so there is no
+     * reason to let it diverge between search and final fit. */
+    local_fit_options.corner_relief = Rf_asReal(corner_relief);
 
     hdcd_annealing_options_t options;
     memset(&options, 0, sizeof(options));
@@ -605,7 +621,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"hdcd_r_dag_add_edge", (DL_FUNC)&hdcd_r_dag_add_edge, 3},
     {"hdcd_r_dag_clone", (DL_FUNC)&hdcd_r_dag_clone, 1},
     {"hdcd_r_dag_edges", (DL_FUNC)&hdcd_r_dag_edges, 2},
-    {"hdcd_r_dag_fit", (DL_FUNC)&hdcd_r_dag_fit, 15},
+    {"hdcd_r_dag_fit", (DL_FUNC)&hdcd_r_dag_fit, 16},
     {"hdcd_r_dag_fit_joint_log_density", (DL_FUNC)&hdcd_r_dag_fit_joint_log_density, 2},
     {"hdcd_r_dag_fit_holdout_scores", (DL_FUNC)&hdcd_r_dag_fit_holdout_scores, 2},
     {"hdcd_r_dag_fit_all_converged", (DL_FUNC)&hdcd_r_dag_fit_all_converged, 1},
@@ -617,7 +633,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"hdcd_r_local_fit_selected_bernstein_degree", (DL_FUNC)&hdcd_r_local_fit_selected_bernstein_degree, 2},
     {"hdcd_r_local_fit_max_tail_dependence", (DL_FUNC)&hdcd_r_local_fit_max_tail_dependence, 2},
     {"hdcd_r_local_fit_conditional_log_density", (DL_FUNC)&hdcd_r_local_fit_conditional_log_density, 4},
-    {"hdcd_r_run_annealing", (DL_FUNC)&hdcd_r_run_annealing, 18},
+    {"hdcd_r_run_annealing", (DL_FUNC)&hdcd_r_run_annealing, 19},
     {NULL, NULL, 0}
 };
 

@@ -104,6 +104,20 @@ typedef struct hdcd_local_fit_options {
     size_t bernstein_degree_grid_size;
     double tail_dependence_gate;
     size_t tail_dependence_k; /* forwarded to hdcd_tail_dependence_coefficient; 0 selects its own default */
+
+    /* Optional: anisotropic (corner-relaxed) roughness penalty (see
+     * hdcd/bernstein.h's hdcd_bernstein_roughness_penalty_weighted and
+     * DECISIONS.md's "anisotropic (corner-relaxed) roughness penalty"
+     * entry) -- applied to EVERY edge fit by hdcd_local_fit_node
+     * (including inside a lambda_roughness_grid/bernstein_degree_grid
+     * search, if either is active). `corner_relief = 0` (the default)
+     * recovers the original uniform roughness penalty exactly --
+     * behavior is unchanged unless this field is set. Must be in
+     * [0, 1). This is a FIXED scalar for v1, not itself searched by a
+     * grid (unlike lambda_roughness/bernstein_degree above) -- see
+     * DECISIONS.md for why, and for the logged follow-up of extending
+     * it to one. */
+    double corner_relief;
 } hdcd_local_fit_options_t;
 
 /* One node's fitted conditional copula factor c_j(u_j | u_Pa(j)). */

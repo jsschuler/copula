@@ -62,6 +62,8 @@ hdcd_status_t hdcd_bernstein_tensor_gradient(
  * where Delta^2 is the central second-difference operator. `theta` is
  * (m+1) x (m+1), row-major. R = 0 when m < 2 (fewer than 3 rows/columns
  * means no interior second-difference triple exists).
+ *
+ * Equivalent to hdcd_bernstein_roughness_penalty_weighted(theta, m, 0.0, out).
  */
 hdcd_status_t hdcd_bernstein_roughness_penalty(
     const double *theta, size_t m,
@@ -72,9 +74,44 @@ hdcd_status_t hdcd_bernstein_roughness_penalty(
  * Gradient of the roughness penalty with respect to theta (spec section
  * 10: "The C core must expose both the raw penalty and its gradient").
  * `grad_out` is (m+1) x (m+1), row-major, fully overwritten.
+ *
+ * Equivalent to hdcd_bernstein_roughness_gradient_weighted(theta, m, 0.0, grad_out).
  */
 hdcd_status_t hdcd_bernstein_roughness_gradient(
     const double *theta, size_t m,
+    double *grad_out
+);
+
+/*
+ * Corner-relaxed (anisotropic) variant of the roughness penalty (see
+ * DECISIONS.md's "anisotropic (corner-relaxed) roughness penalty"
+ * entry). Each interior second-difference residual, centered at grid
+ * position (i,j) in the (m+1)x(m+1) Theta grid, is weighted by
+ *
+ *   w(i,j) = 1 - corner_relief * edge_proximity(i) * edge_proximity(j),
+ *   edge_proximity(k) = 1 - min(k, dim-1-k) / ((dim-1)/2)  in [0,1],
+ *
+ * where dim = m+1. edge_proximity(k) is 1 exactly at either edge
+ * (k=0 or k=dim-1) and falls linearly to 0 at the grid's center, so the
+ * product w(i,j) is close to 1 (full, unchanged penalty) everywhere
+ * except near the tensor's four CORNERS -- where u and z are BOTH
+ * extreme simultaneously, exactly where tail dependence concentrates --
+ * and dips toward (1 - corner_relief) right at a corner. This lets a
+ * fit sharpen locally near a genuine tail-dependence corner without
+ * raising `bernstein_degree` (and its coefficient count) everywhere.
+ *
+ * Requires 0 <= corner_relief < 1 (kept strictly below 1 so every
+ * weight stays positive and the fitting objective in
+ * src/optimize/local_fit.c remains well-posed even exactly at a
+ * corner). corner_relief = 0 recovers the unweighted penalty exactly.
+ */
+hdcd_status_t hdcd_bernstein_roughness_penalty_weighted(
+    const double *theta, size_t m, double corner_relief,
+    double *out
+);
+
+hdcd_status_t hdcd_bernstein_roughness_gradient_weighted(
+    const double *theta, size_t m, double corner_relief,
     double *grad_out
 );
 

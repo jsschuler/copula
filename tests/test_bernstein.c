@@ -251,6 +251,180 @@ static void test_roughness_penalty_zero_for_linear_theta(void) {
     HDCD_PASS("roughness penalty vanishes for an affine-in-index theta");
 }
 
+static void test_weighted_penalty_matches_unweighted_at_zero_relief(void) {
+    size_t m = 5, dim = m + 1;
+    double *theta = (double *)malloc(dim * dim * sizeof(double));
+    rng_seed(42);
+    for (size_t i = 0; i < dim * dim; i++) theta[i] = rng_uniform() * 4.0 - 2.0;
+
+    double unweighted, weighted;
+    HDCD_CHECK(hdcd_bernstein_roughness_penalty(theta, m, &unweighted) == HDCD_OK);
+    HDCD_CHECK(hdcd_bernstein_roughness_penalty_weighted(theta, m, 0.0, &weighted) == HDCD_OK);
+    HDCD_CHECK_NEAR(unweighted, weighted, 1e-15);
+
+    double *grad_unweighted = (double *)malloc(dim * dim * sizeof(double));
+    double *grad_weighted = (double *)malloc(dim * dim * sizeof(double));
+    HDCD_CHECK(hdcd_bernstein_roughness_gradient(theta, m, grad_unweighted) == HDCD_OK);
+    HDCD_CHECK(hdcd_bernstein_roughness_gradient_weighted(theta, m, 0.0, grad_weighted) == HDCD_OK);
+    for (size_t i = 0; i < dim * dim; i++) {
+        HDCD_CHECK_NEAR(grad_unweighted[i], grad_weighted[i], 1e-15);
+    }
+
+    free(theta); free(grad_unweighted); free(grad_weighted);
+    HDCD_PASS("corner_relief=0 reproduces the unweighted penalty and gradient exactly");
+}
+
+static void test_weighted_gradient_matches_finite_difference(void) {
+    size_t m = 6, dim = m + 1;
+    double *theta = (double *)malloc(dim * dim * sizeof(double));
+    double *grad = (double *)malloc(dim * dim * sizeof(double));
+    double corner_relief = 0.7;
+
+    rng_seed(123);
+    for (size_t i = 0; i < dim * dim; i++) theta[i] = rng_uniform() * 6.0 - 3.0;
+
+    HDCD_CHECK(hdcd_bernstein_roughness_gradient_weighted(theta, m, corner_relief, grad) == HDCD_OK);
+
+    double eps = 1e-6;
+    for (size_t a = 0; a < dim; a++) {
+        for (size_t b = 0; b < dim; b++) {
+            double original = theta[a * dim + b];
+
+            theta[a * dim + b] = original + eps;
+            double r_hi;
+            HDCD_CHECK(hdcd_bernstein_roughness_penalty_weighted(theta, m, corner_relief, &r_hi) == HDCD_OK);
+
+            theta[a * dim + b] = original - eps;
+            double r_lo;
+            HDCD_CHECK(hdcd_bernstein_roughness_penalty_weighted(theta, m, corner_relief, &r_lo) == HDCD_OK);
+
+            theta[a * dim + b] = original;
+
+            double fd = (r_hi - r_lo) / (2.0 * eps);
+            HDCD_CHECK_NEAR(fd, grad[a * dim + b], 1e-4);
+        }
+    }
+
+    free(theta); free(grad);
+    HDCD_PASS("weighted roughness penalty gradient matches finite differences on theta");
+}
+
+static double reference_edge_proximity(size_t k, size_t dim) {
+    double half = (double)(dim - 1) / 2.0;
+    size_t dist = (k < dim - 1 - k) ? k : (dim - 1 - k);
+    return 1.0 - (double)dist / half;
+}
+
+static double reference_weighted_penalty(const double *theta, size_t m, double corner_relief) {
+    size_t dim = m + 1;
+    double penalty = 0.0;
+    for (size_t s = 0; s < dim; s++) {
+        for (size_t r = 0; r + 2 < dim; r++) {
+            double d = theta[r * dim + s] - 2.0 * theta[(r + 1) * dim + s] + theta[(r + 2) * dim + s];
+            double w = 1.0 - corner_relief * reference_edge_proximity(r + 1, dim) * reference_edge_proximity(s, dim);
+            penalty += w * d * d;
+        }
+    }
+    for (size_t r = 0; r < dim; r++) {
+        for (size_t s = 0; s + 2 < dim; s++) {
+            double d = theta[r * dim + s] - 2.0 * theta[r * dim + (s + 1)] + theta[r * dim + (s + 2)];
+            double w = 1.0 - corner_relief * reference_edge_proximity(r, dim) * reference_edge_proximity(s + 1, dim);
+            penalty += w * d * d;
+        }
+    }
+    return penalty;
+}
+
+static void test_weighted_penalty_matches_independent_reimplementation(void) {
+    /* Independently reimplement the documented weight formula from
+     * hdcd/bernstein.h in the test itself and check the library's
+     * output against it directly -- more robust than reasoning about
+     * relative magnitudes between different theta placements, since the
+     * standard second-difference penalty already has a real, unrelated
+     * boundary-vs-interior asymmetry (fewer overlapping difference
+     * windows touch a boundary column/row than an interior one) that
+     * would otherwise confound a magnitude comparison. */
+    size_t m = 8, dim = m + 1;
+    double *theta = (double *)malloc(dim * dim * sizeof(double));
+    rng_seed(77);
+    for (size_t i = 0; i < dim * dim; i++) theta[i] = rng_uniform() * 5.0 - 2.5;
+
+    for (double corner_relief = 0.0; corner_relief < 0.95; corner_relief += 0.3) {
+        double actual, expected = reference_weighted_penalty(theta, m, corner_relief);
+        HDCD_CHECK(hdcd_bernstein_roughness_penalty_weighted(theta, m, corner_relief, &actual) == HDCD_OK);
+        HDCD_CHECK_NEAR(actual, expected, 1e-9);
+    }
+
+    free(theta);
+    HDCD_PASS("weighted roughness penalty matches an independent reimplementation of the documented weight formula");
+}
+
+static void test_corner_relief_relaxes_penalty_monotonically(void) {
+    /* For a generic (nonzero-everywhere) theta, raising corner_relief
+     * can only ever hold weights fixed or shrink them further towards
+     * the corners -- never raise them -- so the total penalty must be
+     * monotonically non-increasing in corner_relief. */
+    size_t m = 7, dim = m + 1;
+    double *theta = (double *)malloc(dim * dim * sizeof(double));
+    rng_seed(2024);
+    for (size_t i = 0; i < dim * dim; i++) theta[i] = rng_uniform() * 3.0 - 1.5;
+
+    double prev = -1.0;
+    for (double corner_relief = 0.0; corner_relief < 0.99; corner_relief += 0.2) {
+        double penalty;
+        HDCD_CHECK(hdcd_bernstein_roughness_penalty_weighted(theta, m, corner_relief, &penalty) == HDCD_OK);
+        if (prev >= 0.0) {
+            HDCD_CHECK(penalty <= prev + 1e-9);
+        }
+        prev = penalty;
+    }
+    /* And it should be a STRICT decrease overall for generic random theta. */
+    double p_zero, p_high;
+    HDCD_CHECK(hdcd_bernstein_roughness_penalty_weighted(theta, m, 0.0, &p_zero) == HDCD_OK);
+    HDCD_CHECK(hdcd_bernstein_roughness_penalty_weighted(theta, m, 0.9, &p_high) == HDCD_OK);
+    HDCD_CHECK(p_high < p_zero);
+
+    free(theta);
+    HDCD_PASS("raising corner_relief monotonically (and strictly, for generic theta) shrinks the total penalty");
+}
+
+static void test_corner_relief_has_no_effect_at_m_equals_2(void) {
+    /* At m=2 (dim=3), EVERY column-difference residual's row-center is
+     * forced to be exactly row index 1 (the only valid r+1, since r=0
+     * is the only row with r+2<3) -- the grid's own vertical center --
+     * and likewise every row-difference residual's column-center is
+     * forced to column 1, the horizontal center. edge_proximity() is
+     * exactly 0 at a true center index, so corner_weight() is exactly 1
+     * for every single residual regardless of corner_relief: an exact,
+     * theta-independent invariant, not an approximate one. */
+    size_t m = 2, dim = m + 1;
+    double *theta = (double *)malloc(dim * dim * sizeof(double));
+    rng_seed(55);
+    for (size_t i = 0; i < dim * dim; i++) theta[i] = rng_uniform() * 4.0 - 2.0;
+
+    double unweighted;
+    HDCD_CHECK(hdcd_bernstein_roughness_penalty(theta, m, &unweighted) == HDCD_OK);
+    for (double corner_relief = 0.0; corner_relief < 0.99; corner_relief += 0.3) {
+        double weighted;
+        HDCD_CHECK(hdcd_bernstein_roughness_penalty_weighted(theta, m, corner_relief, &weighted) == HDCD_OK);
+        HDCD_CHECK_NEAR(weighted, unweighted, 1e-12);
+    }
+
+    free(theta);
+    HDCD_PASS("at m=2 every residual is centered on the grid's own center, so corner_relief has provably no effect");
+}
+
+static void test_corner_relief_invalid_arguments(void) {
+    double theta[16] = {0};
+    double scalar, grad[16];
+    HDCD_CHECK(hdcd_bernstein_roughness_penalty_weighted(theta, 3, -0.1, &scalar) == HDCD_ERROR_INVALID_ARGUMENT);
+    HDCD_CHECK(hdcd_bernstein_roughness_penalty_weighted(theta, 3, 1.0, &scalar) == HDCD_ERROR_INVALID_ARGUMENT);
+    HDCD_CHECK(hdcd_bernstein_roughness_gradient_weighted(theta, 3, -0.1, grad) == HDCD_ERROR_INVALID_ARGUMENT);
+    HDCD_CHECK(hdcd_bernstein_roughness_gradient_weighted(theta, 3, 1.0, grad) == HDCD_ERROR_INVALID_ARGUMENT);
+    HDCD_CHECK(hdcd_bernstein_roughness_penalty_weighted(NULL, 3, 0.5, &scalar) == HDCD_ERROR_INVALID_ARGUMENT);
+    HDCD_PASS("corner_relief outside [0,1) is rejected");
+}
+
 static void test_invalid_arguments(void) {
     double out[4];
     HDCD_CHECK(hdcd_bernstein_basis(-0.1, 3, out) == HDCD_ERROR_INVALID_ARGUMENT);
@@ -281,6 +455,12 @@ int main(void) {
     test_roughness_gradient_matches_finite_difference();
     test_roughness_penalty_small_degrees_is_zero();
     test_roughness_penalty_zero_for_linear_theta();
+    test_weighted_penalty_matches_unweighted_at_zero_relief();
+    test_weighted_gradient_matches_finite_difference();
+    test_weighted_penalty_matches_independent_reimplementation();
+    test_corner_relief_relaxes_penalty_monotonically();
+    test_corner_relief_has_no_effect_at_m_equals_2();
+    test_corner_relief_invalid_arguments();
     test_invalid_arguments();
     printf("All bernstein tests passed.\n");
     return 0;

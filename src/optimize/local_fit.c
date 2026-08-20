@@ -73,8 +73,11 @@ static double raw_kernel_callback(double u, const double *z, size_t z_dim, void 
     return exp(log_k);
 }
 
-/* Objective for one edge's Theta: <Theta, M> - lambda_R * R(Theta). */
-static double theta_objective(const double *theta, const double *m_stat, size_t m, double lambda_r) {
+/* Objective for one edge's Theta: <Theta, M> - lambda_R * R(Theta), R
+ * optionally corner-relaxed (see DECISIONS.md's "anisotropic
+ * (corner-relaxed) roughness penalty"; corner_relief=0 is the original
+ * uniform R). */
+static double theta_objective(const double *theta, const double *m_stat, size_t m, double lambda_r, double corner_relief) {
     size_t dim = m + 1;
     double dot = 0.0;
     double ridge = 0.0;
@@ -83,7 +86,7 @@ static double theta_objective(const double *theta, const double *m_stat, size_t 
         ridge += theta[i] * theta[i];
     }
     double roughness;
-    hdcd_bernstein_roughness_penalty(theta, m, &roughness);
+    hdcd_bernstein_roughness_penalty_weighted(theta, m, corner_relief, &roughness);
     double lambda_ridge = HDCD_LOCAL_FIT_RIDGE_FRACTION * lambda_r;
     return dot - lambda_r * roughness - lambda_ridge * ridge;
 }
@@ -93,7 +96,7 @@ static double theta_objective(const double *theta, const double *m_stat, size_t 
  * R is a positive-semidefinite quadratic form), via backtracking
  * (Armijo) line search. Returns 1 if the gradient norm fell below tol. */
 static int fit_theta_edge(
-    double *theta, const double *m_stat, size_t m, double lambda_r,
+    double *theta, const double *m_stat, size_t m, double lambda_r, double corner_relief,
     size_t max_iter, double tol
 ) {
     size_t dim = m + 1;
@@ -115,7 +118,7 @@ static int fit_theta_edge(
     double step = 1.0;
     int converged = 0;
     double lambda_ridge = HDCD_LOCAL_FIT_RIDGE_FRACTION * lambda_r;
-    double prev_obj = theta_objective(theta, m_stat, m, lambda_r);
+    double prev_obj = theta_objective(theta, m_stat, m, lambda_r, corner_relief);
 
     /*
      * Convergence is judged by RELATIVE OBJECTIVE IMPROVEMENT, not raw
@@ -135,7 +138,7 @@ static int fit_theta_edge(
      * this ill-conditioned-but-bounded situation. See DECISIONS.md.
      */
     for (size_t iter = 0; iter < max_iter; iter++) {
-        hdcd_bernstein_roughness_gradient(theta, m, rough_grad);
+        hdcd_bernstein_roughness_gradient_weighted(theta, m, corner_relief, rough_grad);
 
         double grad_norm_sq = 0.0;
         for (size_t i = 0; i < n_entries; i++) {
@@ -149,7 +152,7 @@ static int fit_theta_edge(
             for (size_t i = 0; i < n_entries; i++) {
                 candidate[i] = theta[i] + t * grad[i];
             }
-            candidate_obj = theta_objective(candidate, m_stat, m, lambda_r);
+            candidate_obj = theta_objective(candidate, m_stat, m, lambda_r, corner_relief);
             if (candidate_obj >= prev_obj + HDCD_LOCAL_FIT_ARMIJO_C1 * t * grad_norm_sq) {
                 break;
             }
@@ -218,7 +221,7 @@ static hdcd_status_t fit_and_score(
     const double *u, size_t n, size_t child, const size_t *parents, size_t n_parents,
     const size_t *train_rows, size_t n_train_rows,
     const size_t *score_rows, size_t n_score_rows,
-    size_t m, double lambda_r,
+    size_t m, double lambda_r, double corner_relief,
     size_t theta_max_iter, double theta_tol,
     const hdcd_sinkhorn_options_t *sinkhorn_options,
     local_fit_candidate_t *out
@@ -257,7 +260,7 @@ static hdcd_status_t fit_and_score(
 
     int all_theta_converged = 1;
     for (size_t k = 0; k < n_parents; k++) {
-        int converged = fit_theta_edge(&theta[k * dim * dim], &m_stat[k * dim * dim], m, lambda_r, theta_max_iter, theta_tol);
+        int converged = fit_theta_edge(&theta[k * dim * dim], &m_stat[k * dim * dim], m, lambda_r, corner_relief, theta_max_iter, theta_tol);
         if (!converged) {
             all_theta_converged = 0;
         }
@@ -267,7 +270,7 @@ static hdcd_status_t fit_and_score(
     double roughness_penalty = 0.0;
     for (size_t k = 0; k < n_parents; k++) {
         double r;
-        hdcd_bernstein_roughness_penalty(&theta[k * dim * dim], m, &r);
+        hdcd_bernstein_roughness_penalty_weighted(&theta[k * dim * dim], m, corner_relief, &r);
         roughness_penalty += r;
     }
 
@@ -386,6 +389,9 @@ hdcd_status_t hdcd_local_fit_node(
         }
         if ((lambda_grid_enabled || degree_grid_enabled)
             && (!(roughness_validation_fraction > 0.0) || !(roughness_validation_fraction < 1.0))) {
+            return HDCD_ERROR_INVALID_ARGUMENT;
+        }
+        if (!(options->corner_relief >= 0.0) || options->corner_relief >= 1.0) {
             return HDCD_ERROR_INVALID_ARGUMENT;
         }
     }
@@ -582,7 +588,8 @@ hdcd_status_t hdcd_local_fit_node(
                     u, n, child, parents, n_parents,
                     inner_rows, n_inner_train,
                     inner_rows + n_inner_train, n_inner_val,
-                    degree_candidates[di], lambda_candidates[li], theta_max_iter, theta_tol,
+                    degree_candidates[di], lambda_candidates[li], options->corner_relief,
+                    theta_max_iter, theta_tol,
                     &options->sinkhorn_options, &cand
                 );
                 if (cstatus == HDCD_ERROR_ALLOCATION) {
@@ -630,7 +637,8 @@ hdcd_status_t hdcd_local_fit_node(
         u, n, child, parents, n_parents,
         usable_rows, n_train,
         usable_rows + n_train, n_holdout,
-        fit->m, lambda_to_use, theta_max_iter, theta_tol,
+        fit->m, lambda_to_use, options->corner_relief,
+        theta_max_iter, theta_tol,
         &options->sinkhorn_options, &production
     );
     free(usable_rows);

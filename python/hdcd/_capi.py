@@ -160,6 +160,11 @@ class HdcdLocalFitOptions(Structure):
         ("bernstein_degree_grid_size", c_size_t),
         ("tail_dependence_gate", c_double),
         ("tail_dependence_k", c_size_t),
+        # Anisotropic (corner-relaxed) roughness penalty (see
+        # DECISIONS.md's "anisotropic (corner-relaxed) roughness
+        # penalty"). 0.0 (the ctypes zero default) recovers the original
+        # uniform penalty exactly.
+        ("corner_relief", c_double),
     ]
 
 

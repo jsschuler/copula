@@ -1216,3 +1216,126 @@ and arguably more interesting result than a clean crossover would have
 been. Follow-up, not done here: a properly replicated sweep (multiple
 seeds per $n$, mean +/- CI) restricted to fewer $n$ points and/or a
 smaller search grid to keep total compute bounded.
+
+---
+
+## Post-M12 feature — anisotropic (corner-relaxed) roughness penalty
+
+Discussed several ways to raise `bernstein_degree`'s effective flexibility
+near a tail-dependence corner without the generalization cost the plain
+degree-grid search paid (see the two entries above); picked the cheapest,
+most surgical option to try first: **relax the roughness penalty itself
+near the corners**, rather than adding more coefficients everywhere.
+
+**Design.** `hdcd_bernstein_roughness_penalty_weighted(theta, m,
+corner_relief, out)` (and its gradient counterpart) weight each interior
+second-difference residual, centered at grid position $(i,j)$ in the
+$(m{+}1)\times(m{+}1)$ Theta grid, by
+
+$$w(i,j) = 1 - \text{corner\_relief} \cdot \text{edge\_proximity}(i) \cdot \text{edge\_proximity}(j),$$
+$$\text{edge\_proximity}(k) = 1 - \frac{\min(k,\, \dim{-}1{-}k)}{(\dim{-}1)/2} \in [0,1].$$
+
+`edge_proximity(k)` is 1 exactly at either edge ($k=0$ or $k=\dim{-}1$)
+and falls linearly to 0 at the grid's true center, so $w$ is close to 1
+(full, unchanged penalty) everywhere except near the tensor's four
+CORNERS — where $u$ and $z$ are both extreme simultaneously, exactly
+where tail dependence concentrates — dipping toward $(1 -
+\text{corner\_relief})$ right at a corner. A **linear** taper (not
+Gaussian) was chosen for simplicity: one parameter (`corner_relief`,
+required in $[0,1)$), no extra bandwidth to also tune, and it has two
+analytically checkable properties exploited directly in
+`tests/test_bernstein.c`: at $m=2$ every residual's center is forced onto
+the grid's own true center, so `corner_relief` provably has NO effect at
+all (a clean, theta-independent invariant); and `corner_relief=0`
+reproduces the original unweighted penalty bit-for-bit. A "reimplement
+the documented formula independently inside the test and compare" check
+was used for the general case rather than reasoning about relative
+magnitudes between different theta placements — a placement near a
+boundary column/row picks up genuinely fewer overlapping difference
+windows than an interior one (a real, unrelated structural asymmetry of
+the plain second-difference penalty), which would otherwise confound any
+attempt to compare "corner roughness" against "center roughness" by raw
+magnitude.
+
+**Threaded through as a FIXED scalar for v1, not (yet) itself
+grid-searched.** Unlike `lambda_roughness_grid`/`bernstein_degree_grid`,
+`corner_relief` is applied identically inside every single Theta fit
+(it's a different weighting of the SAME objective, not an extra fit
+call), so there is no per-candidate cost to searching it -- extending it
+to a validated grid (jointly with degree/lambda, or alone) is a small,
+logged follow-up, not attempted yet to keep this addition's scope
+contained.
+
+**Applied to BOTH the annealing search and the final reference-DAG fit**
+(`hdcd_r_run_annealing` gained the same `corner_relief` field), unlike
+the two grids, which are deliberately excluded from annealing purely for
+cost reasons (spec section 18). Since `corner_relief` adds no extra fit
+calls, excluding it from annealing would only buy an inconsistency for
+no benefit: the reference DAG would be searched for under one roughness
+measure and then re-fit under a different one. One consequence, called
+out directly in the new R test (`test-high-level-api.R`): because
+`corner_relief` DOES participate in the annealing objective (through
+`hdcd_local_fit_roughness_penalty`, which `compute_node_score` uses), a
+nonzero `corner_relief` is NOT guaranteed to leave the reference
+structure unchanged the way the grids are guaranteed to -- the test
+isolates the fit-quality effect via `hdcd_fit_dag()` on a fixed structure
+rather than comparing two independently-annealed reference DAGs.
+
+Same Python/Julia struct-mirror update discipline as the previous two
+features (one more trailing field on `hdcd_local_fit_options_t`); both
+bindings' full test suites reverified passing (Python 9/9, Julia 32/32).
+
+## Trials queued for tonight (anisotropic roughness penalty)
+
+Logged so the actual runs (launched right after this entry) are
+traceable back to why they were run, in case they're picked up cold.
+Both use the SAME ground-truth vine construction as
+`notebooks/vine_copula_recovery.Rmd` (9-edge, d=10, mixed families).
+
+**Trial A -- quick single-n sanity check (run inline, not backgrounded;
+seconds, not minutes).** `corner_relief` in $\{0, 0.3, 0.6, 0.8, 0.9\}$
+at $n=2000$, `bernstein_degree=4` and `lambda_roughness=0.15` both FIXED
+(no grid search at all -- isolates corner_relief's own effect cleanly),
+on the two most severely under-fit edges (1->2 Clayton, 7->8 Gumbel).
+Tracks shape-correlation to the true density and `Delta_KL` against the
+`corner_relief=0` baseline. Purpose: does relaxing the penalty near the
+corner improve shape-fit the way raising degree did, WITHOUT raising
+degree's held-out-likelihood cost (since no extra coefficients are being
+added, just reweighted)? A go/no-go check before committing to Trial B's
+overnight compute.
+
+**Trial B -- properly replicated n x corner_relief sweep (backgrounded,
+~50 minutes estimated).** This is also the direct answer to the earlier
+"run a properly replicated sweep with multiple seeds per n" ask, which
+was deferred as too expensive for the degree-grid intervention (~15
+min/replicate at $n=16000$ alone). `corner_relief` is far cheaper to
+sweep: it costs exactly one ordinary `fit_dag` call per (n,
+corner_relief) point, not a multi-candidate grid search, so real
+replication is affordable here in a way it wasn't for
+`bernstein_degree_grid`.
+
+- $n \in \{2000, 4000, 8000, 16000\}$ (same grid as the earlier degree
+  sweep, for direct comparability).
+- `corner_relief` $\in \{0, 0.3, 0.6, 0.8\}$, `bernstein_degree=4` and
+  `lambda_roughness=0.15` both fixed throughout (isolating corner_relief
+  exactly as Trial A does, just replicated and swept over n).
+- 6 replicate seeds per $n$ (a fresh independent data draw per
+  replicate, not a superset), data generation shared across the 4
+  `corner_relief` values within a replicate (only the fit differs, so no
+  need to regenerate data 4 times over).
+- Tracks, per (n, corner_relief, replicate): shape-correlation and
+  `Delta_KL` (vs. `corner_relief=0` at that same n and replicate) on the
+  two worst edges, plus the fitted Theta's own diagnostics
+  (`hdcd_local_fit_roughness_penalty`).
+- Estimated cost: ~500s/replicate x 6 replicates ~= 50 minutes total,
+  saved to `notebooks/corner_relief_sweep_results.csv` via
+  `notebooks/corner_relief_sweep_experiment.R` (mirroring
+  `n_sweep_experiment.R`'s pattern: standalone, reproducible, not
+  re-executed on every notebook render).
+- Success criterion, decided in advance rather than after seeing the
+  data: `corner_relief` is worth keeping if, averaged over replicates,
+  it improves shape-correlation on the worst edges WITHOUT a
+  statistically clear `Delta_KL` cost (mean `Delta_KL` for the best
+  `corner_relief` value should not sit outside roughly 1-2 replicate
+  standard deviations above 0) -- the same standard the degree-grid
+  approach failed to meet.
