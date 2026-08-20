@@ -2,7 +2,6 @@
 #include "hdcd/bernstein.h"
 #include "hdcd/rng.h"
 #include "hdcd/tail_dependence.h"
-#include "hdcd/parametric_tail.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -36,16 +35,6 @@ typedef struct {
     size_t m;
     size_t n_parents;
     const double *theta; /* n_parents * (m+1)*(m+1); points at the owning hdcd_local_fit_t's theta */
-    /* Copula-level EVT tail-splice (see hdcd_local_fit_options_t and
-     * DECISIONS.md's "copula-level EVT tail-splice" entry). NULL
-     * tail_family means "no splice for any parent" -- the common case,
-     * costing nothing beyond one extra NULL check per kernel call. When
-     * non-NULL, both arrays have length n_parents; a per-parent entry of
-     * HDCD_TAIL_FAMILY_NONE means that specific edge has no splice even
-     * though others might. */
-    const hdcd_tail_family_t *tail_family;
-    const double *tail_theta;
-    double evt_splice_bandwidth;
 } kernel_userdata_t;
 
 struct hdcd_local_fit {
@@ -53,8 +42,6 @@ struct hdcd_local_fit {
     size_t *parent_order;      /* copy of caller's parents[], unmodified order */
     size_t m;                  /* Bernstein degree */
     double *theta;               /* n_parents * (m+1)*(m+1), concatenated per parent, row-major each */
-    hdcd_tail_family_t *tail_family; /* n_parents; owned; NULL if evt_splice_gate was 0 */
-    double *tail_theta;               /* n_parents; owned; parallel to tail_family */
     /* Owned so it outlives this function: `sinkhorn` stores a pointer to
      * it internally and dereferences it on every future evaluation call,
      * not just during fitting -- it must live as long as `sinkhorn` does,
@@ -71,27 +58,6 @@ struct hdcd_local_fit {
     int theta_converged;
 };
 
-/* Corner-bump weight for the EVT blend below: a Gaussian bump in
- * (u,z)-space centered on whichever corner `family` targets (Clayton:
- * (0,0), lower-tail; Gumbel: (1,1), upper-tail), close to 1 right at the
- * corner and decaying to ~0 within a few `bandwidth`s of it. Reuses the
- * same "distance-from-corner, product-of-two-1D-terms" shape as
- * corner_relief's edge_proximity (hdcd/bernstein.h), just continuous in
- * (u,z) instead of discrete on the Theta grid, since this weight blends
- * the RAW KERNEL at arbitrary (u,z) evaluation points, not a fixed
- * coefficient grid. */
-static double evt_corner_weight(double u, double z, hdcd_tail_family_t family, double bandwidth) {
-    double du, dz;
-    if (family == HDCD_TAIL_FAMILY_CLAYTON) {
-        du = u;
-        dz = z;
-    } else {
-        du = 1.0 - u;
-        dz = 1.0 - z;
-    }
-    return exp(-(du * du + dz * dz) / (2.0 * bandwidth * bandwidth));
-}
-
 static double raw_kernel_callback(double u, const double *z, size_t z_dim, void *userdata) {
     const kernel_userdata_t *kd = (const kernel_userdata_t *)userdata;
     (void)z_dim;
@@ -100,16 +66,7 @@ static double raw_kernel_callback(double u, const double *z, size_t z_dim, void 
     for (size_t k = 0; k < kd->n_parents; k++) {
         double g;
         hdcd_bernstein_tensor_interaction(u, z[k], kd->m, &kd->theta[k * dim * dim], &g);
-        if (kd->tail_family != NULL && kd->tail_family[k] != HDCD_TAIL_FAMILY_NONE) {
-            double w = evt_corner_weight(u, z[k], kd->tail_family[k], kd->evt_splice_bandwidth);
-            double parametric_density;
-            hdcd_status_t pstatus = hdcd_tail_family_density(kd->tail_family[k], u, z[k], kd->tail_theta[k], &parametric_density);
-            double log_parametric = (pstatus == HDCD_OK && parametric_density > 0.0)
-                                     ? log(parametric_density) : g; /* numerically degenerate corner point: fall back to the Bernstein term alone */
-            log_k += (1.0 - w) * g + w * log_parametric;
-        } else {
-            log_k += g;
-        }
+        log_k += g;
     }
     if (log_k > HDCD_LOCAL_FIT_LOG_KERNEL_CLIP) log_k = HDCD_LOCAL_FIT_LOG_KERNEL_CLIP;
     if (log_k < -HDCD_LOCAL_FIT_LOG_KERNEL_CLIP) log_k = -HDCD_LOCAL_FIT_LOG_KERNEL_CLIP;
@@ -265,7 +222,6 @@ static hdcd_status_t fit_and_score(
     const size_t *train_rows, size_t n_train_rows,
     const size_t *score_rows, size_t n_score_rows,
     size_t m, double lambda_r, double corner_relief,
-    const hdcd_tail_family_t *tail_family, const double *tail_theta, double evt_splice_bandwidth,
     size_t theta_max_iter, double theta_tol,
     const hdcd_sinkhorn_options_t *sinkhorn_options,
     local_fit_candidate_t *out
@@ -328,9 +284,6 @@ static hdcd_status_t fit_and_score(
     kd->m = m;
     kd->n_parents = n_parents;
     kd->theta = theta;
-    kd->tail_family = tail_family;
-    kd->tail_theta = tail_theta;
-    kd->evt_splice_bandwidth = evt_splice_bandwidth;
 
     hdcd_sinkhorn_t *sk = NULL;
     hdcd_status_t sinkhorn_status = hdcd_sinkhorn_fit(
@@ -439,12 +392,6 @@ hdcd_status_t hdcd_local_fit_node(
             return HDCD_ERROR_INVALID_ARGUMENT;
         }
         if (!(options->corner_relief >= 0.0) || options->corner_relief >= 1.0) {
-            return HDCD_ERROR_INVALID_ARGUMENT;
-        }
-        if (!(options->evt_splice_gate >= 0.0) || options->evt_splice_gate > 1.0) {
-            return HDCD_ERROR_INVALID_ARGUMENT;
-        }
-        if (options->evt_splice_gate > 0.0 && options->evt_splice_bandwidth < 0.0) {
             return HDCD_ERROR_INVALID_ARGUMENT;
         }
     }
@@ -598,90 +545,6 @@ hdcd_status_t hdcd_local_fit_node(
         n_lambda_candidates = 1;
     }
 
-    /* Copula-level EVT tail-splice (see DECISIONS.md's "copula-level
-     * EVT tail-splice" entry). Gated by the same tail-dependence
-     * diagnostic as bernstein_degree_grid above (recomputed
-     * independently here for v1 simplicity, even when both options are
-     * active at once -- a known, minor redundant-computation cost, not
-     * a correctness issue). Family selection and the diagnostic use ALL
-     * usable rows; the parametric MLE fit itself uses ONLY the outer
-     * TRAIN rows, computed ONCE per node here -- not per grid candidate
-     * below, since the parametric fit doesn't depend on Theta's own
-     * degree/lambda at all and would otherwise be refit identically,
-     * uselessly, for every candidate in the search below.
-     *
-     * Default bandwidth 0.08: empirically calibrated (not inherited
-     * from corner_relief's unrelated 0.15 default -- see DECISIONS.md).
-     * The blend is a weighted GEOMETRIC mean of the raw (unnormalized)
-     * Bernstein kernel with the already-normalized parametric density;
-     * a wide bandwidth lets the parametric term dominate well outside
-     * the corner, where the Bernstein tensor already fits the bulk
-     * well, and the resulting scale mismatch degrades the Sinkhorn-
-     * normalized fit even on edges where the true family was selected
-     * correctly. A tight bandwidth confines the splice to the corner
-     * where the parametric family's advantage is real. */
-    double evt_splice_bandwidth = 0.08;
-    if (options->evt_splice_gate > 0.0) {
-        fit->tail_family = (hdcd_tail_family_t *)malloc(n_parents * sizeof(hdcd_tail_family_t));
-        fit->tail_theta = (double *)malloc(n_parents * sizeof(double));
-        double *evt_col_child = (double *)malloc(n_usable * sizeof(double));
-        double *evt_col_parent = (double *)malloc(n_usable * sizeof(double));
-        double *evt_train_u = (double *)malloc(n_train * sizeof(double));
-        double *evt_train_z = (double *)malloc(n_train * sizeof(double));
-        if (fit->tail_family == NULL || fit->tail_theta == NULL || evt_col_child == NULL
-            || evt_col_parent == NULL || evt_train_u == NULL || evt_train_z == NULL) {
-            free(evt_col_child); free(evt_col_parent); free(evt_train_u); free(evt_train_z);
-            free(usable_rows);
-            hdcd_local_fit_free(fit);
-            return HDCD_ERROR_ALLOCATION;
-        }
-        if (options->evt_splice_bandwidth > 0.0) {
-            evt_splice_bandwidth = options->evt_splice_bandwidth;
-        }
-
-        for (size_t i = 0; i < n_usable; i++) {
-            evt_col_child[i] = u[child * n + usable_rows[i]];
-        }
-        for (size_t k = 0; k < n_parents; k++) {
-            fit->tail_family[k] = HDCD_TAIL_FAMILY_NONE;
-            fit->tail_theta[k] = NAN;
-            for (size_t i = 0; i < n_usable; i++) {
-                evt_col_parent[i] = u[parents[k] * n + usable_rows[i]];
-            }
-            double lam_upper, lam_lower;
-            hdcd_status_t td_status = hdcd_tail_dependence_coefficient(
-                evt_col_child, evt_col_parent, n_usable, options->tail_dependence_k, &lam_upper, &lam_lower
-            );
-            if (td_status != HDCD_OK) {
-                continue; /* not enough usable rows: treated as "no tail evidence" */
-            }
-            double strongest = (lam_upper > lam_lower) ? lam_upper : lam_lower;
-            if (strongest < options->evt_splice_gate) {
-                continue;
-            }
-            hdcd_tail_family_t family = (lam_lower >= lam_upper) ? HDCD_TAIL_FAMILY_CLAYTON : HDCD_TAIL_FAMILY_GUMBEL;
-            for (size_t i = 0; i < n_train; i++) {
-                size_t row = usable_rows[i];
-                evt_train_u[i] = u[child * n + row];
-                evt_train_z[i] = u[parents[k] * n + row];
-            }
-            double theta_fit;
-            hdcd_status_t fit_status = hdcd_tail_family_fit(family, evt_train_u, evt_train_z, n_train, &theta_fit);
-            if (fit_status == HDCD_OK || fit_status == HDCD_ERROR_NOT_CONVERGED) {
-                fit->tail_family[k] = family;
-                fit->tail_theta[k] = theta_fit;
-            }
-            /* A hard failure (allocation/invalid-argument/numerical) from
-             * the MLE fit leaves this edge with NO splice (NONE) rather
-             * than aborting the whole node fit -- the plain Bernstein
-             * kernel is always a safe fallback. */
-        }
-        free(evt_col_child);
-        free(evt_col_parent);
-        free(evt_train_u);
-        free(evt_train_z);
-    }
-
     size_t m_to_use;
     double lambda_to_use;
     if (n_degree_candidates == 1 && n_lambda_candidates == 1) {
@@ -726,7 +589,6 @@ hdcd_status_t hdcd_local_fit_node(
                     inner_rows, n_inner_train,
                     inner_rows + n_inner_train, n_inner_val,
                     degree_candidates[di], lambda_candidates[li], options->corner_relief,
-                    fit->tail_family, fit->tail_theta, evt_splice_bandwidth,
                     theta_max_iter, theta_tol,
                     &options->sinkhorn_options, &cand
                 );
@@ -776,7 +638,6 @@ hdcd_status_t hdcd_local_fit_node(
         usable_rows, n_train,
         usable_rows + n_train, n_holdout,
         fit->m, lambda_to_use, options->corner_relief,
-        fit->tail_family, fit->tail_theta, evt_splice_bandwidth,
         theta_max_iter, theta_tol,
         &options->sinkhorn_options, &production
     );
@@ -810,10 +671,8 @@ void hdcd_local_fit_free(hdcd_local_fit_t *fit) {
     }
     free(fit->parent_order);
     hdcd_sinkhorn_free(fit->sinkhorn); /* must be freed before kernel_userdata, which it references */
-    free(fit->kernel_userdata); /* does not own ->theta/->tail_family/->tail_theta, no double free below */
+    free(fit->kernel_userdata); /* does not own ->theta, no double free below */
     free(fit->theta);
-    free(fit->tail_family);
-    free(fit->tail_theta);
     free(fit);
 }
 
@@ -855,21 +714,6 @@ size_t hdcd_local_fit_selected_bernstein_degree(const hdcd_local_fit_t *fit) {
 
 double hdcd_local_fit_max_tail_dependence(const hdcd_local_fit_t *fit) {
     return (fit != NULL) ? fit->max_tail_dependence : NAN;
-}
-
-hdcd_tail_family_t hdcd_local_fit_tail_family(const hdcd_local_fit_t *fit, size_t parent_idx) {
-    if (fit == NULL || fit->tail_family == NULL || parent_idx >= fit->n_parents) {
-        return HDCD_TAIL_FAMILY_NONE;
-    }
-    return fit->tail_family[parent_idx];
-}
-
-double hdcd_local_fit_tail_theta(const hdcd_local_fit_t *fit, size_t parent_idx) {
-    if (fit == NULL || fit->tail_theta == NULL || parent_idx >= fit->n_parents
-        || fit->tail_family[parent_idx] == HDCD_TAIL_FAMILY_NONE) {
-        return NAN;
-    }
-    return fit->tail_theta[parent_idx];
 }
 
 int hdcd_local_fit_theta_converged(const hdcd_local_fit_t *fit) {

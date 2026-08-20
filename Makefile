@@ -43,7 +43,6 @@ LIB_SRCS := \
   src/marginal/bandwidth_cv.c \
   src/marginal/marginal_model.c \
   src/copula/transform.c \
-  src/copula/parametric_tail.c \
   src/dcor/dcor_exact.c \
   src/dcor/dependence_matrix.c \
   src/dcor/tail_dependence.c \

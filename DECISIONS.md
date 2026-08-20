@@ -1678,3 +1678,51 @@ this entry are accurate as computed, but should not be read as
 evidence the splice is "working, just modestly" -- the density plot at
 the correct (near-corner) slice is the honest picture, and it shows a
 distortion, not a muted win.
+
+**REMOVED from `hdcd` entirely (C core, tests, R/Python/Julia
+bindings) — for a reason independent of the empirical finding above.**
+Assuming a parametric copula family for the joint dependence structure
+is outside this library's design: spec section 3's "Extreme-Value Tail
+Extension" is a *marginal*-level provision (splicing generalized Pareto
+tails onto each dimension's univariate CDF `F_j(x)`), and says nothing
+about the joint copula density, which the centered-Bernstein-tensor-
+plus-Sinkhorn machinery (spec section 9 onward) is deliberately
+designed to estimate without assuming any family. The EVT tail-splice
+never fit under that provision; it was, in retrospect, off-design from
+the moment it was chosen, independent of whether it could have been
+made to work well technically. Both reasons hold at once, and neither
+depends on the other: this was the wrong kind of fix for this library
+to carry AND, separately, it did not cleanly work even when correctly
+calibrated.
+
+Deleted: `include/hdcd/parametric_tail.h`, `src/copula/parametric_tail.c`,
+`tests/test_parametric_tail.c`; `evt_splice_gate`/`evt_splice_bandwidth`
+and the `tail_family`/`tail_theta` fields and accessors removed from
+`hdcd_local_fit_options_t`/`hdcd_local_fit_t` (`include/hdcd/local_fit.h`,
+`src/optimize/local_fit.c`); the six `test_evt_splice_*` tests removed
+from `tests/test_local_fit.c`; the R glue's `evt_splice_gate`/
+`evt_splice_bandwidth` SEXP args and the `hdcd_r_local_fit_tail_family`/
+`hdcd_r_local_fit_tail_theta` functions removed from `r/src/hdcd_r.c`
+(and `CallEntries`); `hdcd_node_tail_family()`/`hdcd_node_tail_theta()`
+and the corresponding low-level wrappers removed from `r/R/hdcd.R` and
+`r/NAMESPACE`; the `evt_splice_gate` R test removed from
+`r/tests/testthat/test-high-level-api.R`; the two trailing fields
+removed from the `HdcdLocalFitOptions` struct mirrors in
+`python/hdcd/_capi.py` and `julia/src/HDCD.jl`. `hdcd_node_tail_dependence()`
+(the underlying tail-dependence-coefficient diagnostic, shared with
+`bernstein_degree_grid`) is unaffected and remains.
+
+The notebook's demonstration of this finding (see "Does a true EVT
+tail-splice...") was NOT deleted along with the feature -- the finding
+itself (miscalibration actively harms; correct calibration produces a
+correlation gain that turns out, on inspection at the right (u,z)
+slice, to be a shape distortion rather than a real improvement) is a
+genuine, informative result independent of whether the feature ships.
+Its numbers now come from a saved run of the new
+`notebooks/evt_splice_experiment.R`, executed once while the feature
+still existed in the C core and committed alongside its output
+(`notebooks/evt_splice_experiment_results.rds`), loaded by the notebook
+rather than recomputed via the (now-removed) live API -- the same
+"commit a script + its results, load rather than recompute" pattern
+already used for the `n_sweep` and `corner_relief_sweep` experiments
+earlier in this investigation.

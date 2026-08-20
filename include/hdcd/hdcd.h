@@ -25,7 +25,6 @@
 #include "hdcd/numerics.h"
 #include "hdcd/marginal.h"
 #include "hdcd/copula.h"
-#include "hdcd/parametric_tail.h"
 #include "hdcd/dcor.h"
 #include "hdcd/tail_dependence.h"
 #include "hdcd/topology.h"

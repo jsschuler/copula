@@ -307,7 +307,7 @@ SEXP hdcd_r_dag_fit(
     SEXP theta_max_iterations, SEXP theta_tol,
     SEXP lambda_roughness_grid, SEXP roughness_validation_fraction,
     SEXP bernstein_degree_grid, SEXP tail_dependence_gate, SEXP tail_dependence_k,
-    SEXP corner_relief, SEXP evt_splice_gate, SEXP evt_splice_bandwidth
+    SEXP corner_relief
 ) {
     hdcd_dag_t *dag = (hdcd_dag_t *)unwrap_pointer(dag_ext, "dag");
     size_t nn = (size_t)Rf_asInteger(n);
@@ -335,11 +335,8 @@ SEXP hdcd_r_dag_fit(
         options.roughness_validation_fraction = Rf_asReal(roughness_validation_fraction);
     }
 
-    /* Shared by both bernstein_degree_grid's gate and evt_splice_gate
-     * below (both call hdcd_tail_dependence_coefficient); set
-     * unconditionally so a caller using only ONE of the two still gets
-     * their requested k. 0 selects that function's own default either
-     * way. */
+    /* Used by bernstein_degree_grid's gate (hdcd_tail_dependence_coefficient);
+     * 0 selects that function's own default. */
     options.tail_dependence_k = (size_t)Rf_asInteger(tail_dependence_k);
 
     /* Optional tail-dependence-gated, non-global bernstein_degree (see
@@ -364,12 +361,6 @@ SEXP hdcd_r_dag_fit(
      * scalar for v1, applied to every edge fit by this call. 0 (R's
      * default) recovers the original uniform penalty exactly. */
     options.corner_relief = Rf_asReal(corner_relief);
-
-    /* Optional copula-level EVT tail-splice (see DECISIONS.md's
-     * "copula-level EVT tail-splice" entry). 0 (R's default) disables
-     * it entirely -- the plain Bernstein kernel is used unmodified. */
-    options.evt_splice_gate = Rf_asReal(evt_splice_gate);
-    options.evt_splice_bandwidth = Rf_asReal(evt_splice_bandwidth);
 
     hdcd_dag_fit_t *fit = NULL;
     hdcd_status_t status = hdcd_dag_fit(up, mask, nn, dd, dag, &options, &fit);
@@ -482,35 +473,6 @@ SEXP hdcd_r_local_fit_max_tail_dependence(SEXP dag_fit_ext, SEXP node_1idx) {
         Rf_error("invalid node index");
     }
     return Rf_ScalarReal(hdcd_local_fit_max_tail_dependence(node));
-}
-
-SEXP hdcd_r_local_fit_tail_family(SEXP dag_fit_ext, SEXP node_1idx, SEXP parent_1idx) {
-    hdcd_dag_fit_t *fit = (hdcd_dag_fit_t *)unwrap_pointer(dag_fit_ext, "dag_fit");
-    size_t j = (size_t)(Rf_asInteger(node_1idx) - 1);
-    const hdcd_local_fit_t *node = hdcd_dag_fit_node(fit, j);
-    if (node == NULL) {
-        Rf_error("invalid node index");
-    }
-    size_t p = (size_t)(Rf_asInteger(parent_1idx) - 1);
-    hdcd_tail_family_t family = hdcd_local_fit_tail_family(node, p);
-    const char *name;
-    switch (family) {
-        case HDCD_TAIL_FAMILY_CLAYTON: name = "clayton"; break;
-        case HDCD_TAIL_FAMILY_GUMBEL: name = "gumbel"; break;
-        default: name = "none"; break;
-    }
-    return Rf_mkString(name);
-}
-
-SEXP hdcd_r_local_fit_tail_theta(SEXP dag_fit_ext, SEXP node_1idx, SEXP parent_1idx) {
-    hdcd_dag_fit_t *fit = (hdcd_dag_fit_t *)unwrap_pointer(dag_fit_ext, "dag_fit");
-    size_t j = (size_t)(Rf_asInteger(node_1idx) - 1);
-    const hdcd_local_fit_t *node = hdcd_dag_fit_node(fit, j);
-    if (node == NULL) {
-        Rf_error("invalid node index");
-    }
-    size_t p = (size_t)(Rf_asInteger(parent_1idx) - 1);
-    return Rf_ScalarReal(hdcd_local_fit_tail_theta(node, p));
 }
 
 SEXP hdcd_r_local_fit_conditional_log_density(SEXP dag_fit_ext, SEXP node_1idx, SEXP u_vec, SEXP z_vec) {
@@ -662,7 +624,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"hdcd_r_dag_add_edge", (DL_FUNC)&hdcd_r_dag_add_edge, 3},
     {"hdcd_r_dag_clone", (DL_FUNC)&hdcd_r_dag_clone, 1},
     {"hdcd_r_dag_edges", (DL_FUNC)&hdcd_r_dag_edges, 2},
-    {"hdcd_r_dag_fit", (DL_FUNC)&hdcd_r_dag_fit, 18},
+    {"hdcd_r_dag_fit", (DL_FUNC)&hdcd_r_dag_fit, 16},
     {"hdcd_r_dag_fit_joint_log_density", (DL_FUNC)&hdcd_r_dag_fit_joint_log_density, 2},
     {"hdcd_r_dag_fit_holdout_scores", (DL_FUNC)&hdcd_r_dag_fit_holdout_scores, 2},
     {"hdcd_r_dag_fit_all_converged", (DL_FUNC)&hdcd_r_dag_fit_all_converged, 1},
@@ -673,8 +635,6 @@ static const R_CallMethodDef CallEntries[] = {
     {"hdcd_r_local_fit_selected_lambda_roughness", (DL_FUNC)&hdcd_r_local_fit_selected_lambda_roughness, 2},
     {"hdcd_r_local_fit_selected_bernstein_degree", (DL_FUNC)&hdcd_r_local_fit_selected_bernstein_degree, 2},
     {"hdcd_r_local_fit_max_tail_dependence", (DL_FUNC)&hdcd_r_local_fit_max_tail_dependence, 2},
-    {"hdcd_r_local_fit_tail_family", (DL_FUNC)&hdcd_r_local_fit_tail_family, 3},
-    {"hdcd_r_local_fit_tail_theta", (DL_FUNC)&hdcd_r_local_fit_tail_theta, 3},
     {"hdcd_r_local_fit_conditional_log_density", (DL_FUNC)&hdcd_r_local_fit_conditional_log_density, 4},
     {"hdcd_r_run_annealing", (DL_FUNC)&hdcd_r_run_annealing, 19},
     {NULL, NULL, 0}

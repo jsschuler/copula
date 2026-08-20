@@ -864,38 +864,40 @@ nonparametric Bernstein/Sinkhorn machinery: more or fewer polynomial
 coefficients, regularized more or less, everywhere or just at the
 corner. None of them ever introduced an actual *parametric copula
 family*, even though the ground truth here literally is one (Clayton,
-Gumbel, ...) on the flagged edges. `hdcd` now supports this directly: a
-copula-level EVT tail-splice (`evt_splice_gate`/`evt_splice_bandwidth`,
-see `DECISIONS.md`'s "copula-level EVT tail-splice" entry) that, on
-edges whose empirical tail-dependence coefficient clears a gate, fits a
-genuine Clayton or Gumbel density by MLE and blends it into the raw
-Bernstein kernel near the corresponding corner — before Sinkhorn
-normalizes the result, so no hand-built continuity matching is needed;
-Sinkhorn already turns any positive raw kernel into a valid conditional
-copula density.
+Gumbel, ...) on the flagged edges. `hdcd` briefly supported this
+directly: a copula-level EVT tail-splice (`evt_splice_gate`/
+`evt_splice_bandwidth`) that, on edges whose empirical tail-dependence
+coefficient cleared a gate, fit a genuine Clayton or Gumbel density by
+MLE and blended it into the raw Bernstein kernel near the corresponding
+corner — before Sinkhorn normalized the result, so no hand-built
+continuity matching was needed; Sinkhorn already turns any positive raw
+kernel into a valid conditional copula density.
+
+**This feature has since been removed from `hdcd`.** Assuming a
+parametric copula family for the dependence structure is outside this
+library's design: spec section 3's "Extreme-Value Tail Extension" is a
+*marginal*-level provision (splicing generalized Pareto tails onto each
+dimension's univariate CDF), and says nothing about the joint copula
+density, which the centered-Bernstein-tensor-plus-Sinkhorn machinery
+(spec section 9 onward) is deliberately designed to estimate *without*
+assuming any family. This section is kept, unlike the removed API,
+because the finding is still a real and informative part of this
+investigation — it reports results from a saved run of
+`notebooks/evt_splice_experiment.R`, executed once while the feature
+still existed in the C core, rather than calling the (now-removed)
+live API. See `DECISIONS.md`'s "copula-level EVT tail-splice" entry for
+the full history, including the removal decision.
+
+```{r evt-splice-load}
+evt_results <- readRDS("evt_splice_experiment_results.rds")
+```
 
 The first attempt used a permissive gate (`evt_splice_gate = 0.1`) and a
 bandwidth borrowed, unjustified, from `corner_relief` (`0.15`):
 
 ```{r evt-splice-miscalibrated}
-evt_fit_wide <- hdcd:::.dag_fit_c(model$U, n, d, true_fit$dag, bernstein_degree, lambda_roughness,
-                                   holdout_fraction, local_seed,
-                                   evt_splice_gate = 0.1, evt_splice_bandwidth = 0.15)
-
-evt_wide_summary <- do.call(rbind, lapply(seq_len(d - 1), function(i) {
-  node <- i + 1L
-  q <- if (i %in% c(2, 7)) 0.9 else 0.1
-  fitted_fixed <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, node, u_grid, q))
-  fitted_evt <- exp(hdcd:::.local_fit_conditional_log_density(evt_fit_wide, node, u_grid, q))
-  true_dens <- dCopula(cbind(rep(q, length(u_grid)), u_grid), families[[i]])
-  data.frame(
-    edge = sprintf("%d->%d", i, i + 1), family = family_names[i],
-    spliced_family = hdcd:::.local_fit_tail_family(evt_fit_wide, node, 1L),
-    cor_fixed = round(cor(fitted_fixed, true_dens), 3),
-    cor_evt_wide = round(cor(fitted_evt, true_dens), 3)
-  )
-}))
-kable(evt_wide_summary, caption = "evt_splice_gate=0.1, evt_splice_bandwidth=0.15 (miscalibrated first attempt)")
+kable(evt_results$evt_wide_summary,
+      caption = "evt_splice_gate=0.1, evt_splice_bandwidth=0.15 (miscalibrated first attempt)")
 ```
 
 Two problems, visible directly in that table. First, the gate is far too
@@ -922,29 +924,8 @@ tightening the bandwidth to confine the splice to the actual corner
 fixes both problems at once:
 
 ```{r evt-splice-calibrated}
-t0 <- tic()
-evt_fit <- hdcd:::.dag_fit_c(model$U, n, d, true_fit$dag, bernstein_degree, lambda_roughness,
-                              holdout_fraction, local_seed,
-                              evt_splice_gate = 0.5, evt_splice_bandwidth = 0.08)
-evt_fit_time <- toc(t0, "EVT tail-splice fit_dag() (diagnostic only)")
-
-evt_summary <- do.call(rbind, lapply(seq_len(d - 1), function(i) {
-  node <- i + 1L
-  q <- if (i %in% c(2, 7)) 0.9 else 0.1
-  fitted_fixed <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, node, u_grid, q))
-  fitted_evt <- exp(hdcd:::.local_fit_conditional_log_density(evt_fit, node, u_grid, q))
-  true_dens <- dCopula(cbind(rep(q, length(u_grid)), u_grid), families[[i]])
-  data.frame(
-    edge = sprintf("%d->%d", i, i + 1), family = family_names[i],
-    spliced_family = hdcd:::.local_fit_tail_family(evt_fit, node, 1L),
-    theta = round(hdcd:::.local_fit_tail_theta(evt_fit, node, 1L), 2),
-    cor_fixed = round(cor(fitted_fixed, true_dens), 3),
-    cor_evt = round(cor(fitted_evt, true_dens), 3)
-  )
-}))
-kable(evt_summary, caption = "evt_splice_gate=0.5, evt_splice_bandwidth=0.08 (calibrated)")
-cat(sprintf("Delta_KL(fixed baseline vs. evt-splice fit) = %.4f\n",
-            hdcd:::.dag_fit_kl_difference(true_fit$dag_fit, evt_fit)))
+kable(evt_results$evt_summary, caption = "evt_splice_gate=0.5, evt_splice_bandwidth=0.08 (calibrated)")
+cat(sprintf("Delta_KL(fixed baseline vs. evt-splice fit) = %.4f\n", evt_results$delta_kl_evt))
 ```
 
 The correlation numbers above are a summary statistic; the actual shape
@@ -953,22 +934,7 @@ directly, at the same corner slice (`q`) used in the table, for the
 four genuinely tail-dependent edges:
 
 ```{r evt-splice-density-plot, fig.height=8}
-tail_edges <- c(1, 2, 6, 7)
-evt_cond_rows <- list()
-for (i in tail_edges) {
-  node <- i + 1L
-  q <- if (i %in% c(2, 7)) 0.9 else 0.1
-  fitted_fixed <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, node, u_grid, q))
-  fitted_evt <- exp(hdcd:::.local_fit_conditional_log_density(evt_fit, node, u_grid, q))
-  true_dens <- dCopula(cbind(rep(q, length(u_grid)), u_grid), families[[i]])
-  evt_cond_rows[[length(evt_cond_rows) + 1]] <- data.frame(
-    edge = sprintf("%d->%d  %s  (z = %.1f)", i, i + 1, family_names[i], q),
-    u = u_grid,
-    density = c(true_dens, fitted_fixed, fitted_evt),
-    source = rep(c("true", "hdcd (unspliced)", "hdcd (evt-spliced)"), each = length(u_grid))
-  )
-}
-evt_cond_df <- do.call(rbind, evt_cond_rows)
+evt_cond_df <- evt_results$evt_cond_df
 
 ggplot(evt_cond_df, aes(u, density, color = source, linetype = source)) +
   geom_line(linewidth = 0.7) +
@@ -999,24 +965,7 @@ the curve much. This is worth checking directly, at a slice that
 actually is close enough:
 
 ```{r evt-splice-zoomed-corner, fig.height=8}
-u_zoom <- seq(0.01, 0.3, length.out = 60)
-evt_zoom_rows <- list()
-for (i in tail_edges) {
-  node <- i + 1L
-  is_gumbel <- i %in% c(2, 7)
-  q <- if (is_gumbel) 0.98 else 0.02 # right next to the actual corner, not 0.1/0.9
-  ug <- if (is_gumbel) 1 - u_zoom else u_zoom
-  fitted_fixed <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, node, ug, q))
-  fitted_evt <- exp(hdcd:::.local_fit_conditional_log_density(evt_fit, node, ug, q))
-  true_dens <- dCopula(cbind(rep(q, length(ug)), ug), families[[i]])
-  evt_zoom_rows[[length(evt_zoom_rows) + 1]] <- data.frame(
-    edge = sprintf("%d->%d  %s  (z = %.2f)", i, i + 1, family_names[i], q),
-    u = ug,
-    density = c(true_dens, fitted_fixed, fitted_evt),
-    source = rep(c("true", "hdcd (unspliced)", "hdcd (evt-spliced)"), each = length(ug))
-  )
-}
-evt_zoom_df <- do.call(rbind, evt_zoom_rows)
+evt_zoom_df <- evt_results$evt_zoom_df
 
 ggplot(evt_zoom_df, aes(u, density, color = source, linetype = source)) +
   geom_line(linewidth = 0.7) +
@@ -1040,30 +989,26 @@ column). A closer look at edge 1->2's exact fitted values makes this
 precise:
 
 ```{r evt-splice-corner-numbers}
-u_fine <- seq(0.005, 0.3, length.out = 12)
-fitted_fixed <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, 2L, u_fine, 0.02))
-fitted_evt <- exp(hdcd:::.local_fit_conditional_log_density(evt_fit, 2L, u_fine, 0.02))
-true_dens <- dCopula(cbind(rep(0.02, length(u_fine)), u_fine), families[[1]])
-kable(data.frame(u = round(u_fine, 3), true = round(true_dens, 2),
-                  unspliced = round(fitted_fixed, 2), evt_spliced = round(fitted_evt, 2)),
+kable(evt_results$evt_corner_numbers,
       caption = "Edge 1->2 (Clayton), conditional density at z=0.02, near the corner")
 ```
 
-Right at the peak (`u` around 0.015-0.03) the evt-spliced density is
-*lower* than the unspliced fit, not higher — the opposite of what a
+Right at the peak (`u` around 0.03) the evt-spliced density is *lower*
+than the unspliced fit, not higher — the opposite of what a
 corner-strengthening splice is supposed to do — before crossing over
-and overshooting the true density by roughly two orders of magnitude
-once `u` moves into the shoulder (true density is near 0 there; the
-splice pushes the fit up to several times the unspliced value). This
-is a genuine shape distortion, not simply "too small an effect."
+around `u = 0.15`-`0.17` and overshooting the true density by roughly
+two orders of magnitude once `u` moves into the shoulder (true density
+is near 0 there; the splice pushes the fit up to several times the
+unspliced value). This is a genuine shape distortion, not simply "too
+small an effect."
 
 **A plausible explanation, not yet fully confirmed: Archimedean
 densities are highly sensitive to theta specifically *off* the u = z
 diagonal, deep in the corner.** The blend near the true corner is
 almost entirely the parametric term (weight $\approx 0.97$ at
 `u=0.005, z=0.02`), so its shape there is essentially the fitted
-Clayton/Gumbel density's own shape, at the MLE-estimated theta (e.g.
-2.40 vs. a true 3.0 on this edge) rather than the true theta. A
+Clayton/Gumbel density's own shape, at the MLE-estimated theta (2.93
+vs. a true 3.0 on this edge) rather than the true theta. A
 theta estimate that looks close in absolute terms can still produce a
 meaningfully different conditional-density *profile* well off the
 diagonal (`u` far from `z`), where Archimedean families are most
@@ -1099,7 +1044,13 @@ tail dependence concentrates, because the composed fit's local shape
 turns out to be far more sensitive to the residual MLE error than the
 theta-recovery numbers alone would suggest. That is a more useful
 finding for a paper about the genuine difficulties of high-dimensional,
-heavy-tailed modeling than a positive result would have been.
+heavy-tailed modeling than a positive result would have been — and it
+is a *second*, independent reason (alongside the design-scope one at
+the top of this section) that this was the right investigation to run
+and also the right feature to remove afterward: `hdcd`'s nonparametric
+design was never going to admit a parametric-family fix as a permanent
+feature, and empirically, even setting that constraint aside, the fix
+did not cleanly work.
 
 # Summary
 
@@ -1174,35 +1125,40 @@ cat(sprintf("Mean fitted-vs-true conditional density correlation: %.3f\n",
   three interventions tried here to clear its own pre-registered bar.
   See "Does corner relief resolve the tradeoff, properly replicated?"
   above for why that distinction matters.
-- Finally tried the one lever the first three interventions all
-  avoided: an actual *parametric* copula family (a copula-level EVT
-  tail-splice — genuine Clayton/Gumbel MLE fits blended into the raw
-  Bernstein kernel near the tail-dependence corner, before Sinkhorn
-  renormalizes). A first, miscalibrated attempt (`evt_splice_gate=0.1`,
-  a `bandwidth` borrowed unjustified from `corner_relief`) both spliced
-  onto edges with no genuine tail dependence and, more surprisingly,
-  *hurt* shape-correlation on 3 of the 4 edges where it selected the
-  objectively correct family with an accurate fitted parameter. The
-  cause was not the family or parameter choice but how the correct
-  piece was *composed* with the existing machinery — a geometric blend
-  of an unnormalized kernel with an already-normalized density, spliced
-  too far from the actual corner. Recalibrating the gate to match
-  `bernstein_degree_grid`'s (`0.5`) and tightening the bandwidth to
-  `0.08` fixed the false-positive splicing and the active harm on the
-  genuine edges: correctly `"none"` on every smooth edge, and a small,
-  real, directionally-consistent shape-correlation improvement on all
-  four genuinely tail-dependent edges with a favorable `Delta_KL`. **But
-  plotting the actual densities — not just the correlation numbers —
-  shows this does NOT close the visual gap to the true corner spike.**
-  The spliced curve sits almost on top of the unspliced one on every
-  edge; even the objectively correct family with an accurately fitted
-  parameter, correctly gated and correctly bandwidth-tuned, only nudges
-  the fit. Of all four interventions tried in this notebook, none
-  resolves the sharp Clayton/Gumbel corner under-fit in a way that
-  would look convincing on the plot rather than in a summary statistic
-  — see "Does a true EVT tail-splice..." above, and `DECISIONS.md`, for
-  the full calibration story and the density-comparison plot. That
-  negative result, reached only after actually building and correctly
-  calibrating the most principled fix available, is arguably the most
-  representative finding of this whole notebook's investigation into
-  the genuine difficulties of high-dimensional, heavy-tailed modeling.
+- Finally tried, and then removed, the one lever the first three
+  interventions all avoided: an actual *parametric* copula family (a
+  copula-level EVT tail-splice — genuine Clayton/Gumbel MLE fits
+  blended into the raw Bernstein kernel near the tail-dependence
+  corner, before Sinkhorn renormalizes). A first, miscalibrated attempt
+  (`evt_splice_gate=0.1`, a `bandwidth` borrowed unjustified from
+  `corner_relief`) both spliced onto edges with no genuine tail
+  dependence and, more surprisingly, *hurt* shape-correlation on 3 of
+  the 4 edges where it selected the objectively correct family with an
+  accurate fitted parameter. Recalibrating (`gate=0.5`,
+  `bandwidth=0.08`) fixed the false positives and produced a small,
+  real, directionally-consistent correlation improvement with a
+  favorable `Delta_KL` — but plotting the actual densities at the slice
+  where the splice's calibrated bandwidth actually has weight (not the
+  `z=0.1`/`0.9` slice used everywhere else in this notebook, which
+  turned out to be too far from the corner to show the effect at all)
+  revealed the "improvement" was a genuine shape distortion: the
+  spliced fit *undershoots* the true density right at the peak, then
+  *overshoots* it well past the peak, in both cases moving further from
+  the truth, not closer — the correlation gain was apparently an
+  artifact of the shoulder overshoot loosely tracking the true curve's
+  decay. **The feature has since been removed from `hdcd` entirely,
+  for a reason independent of this empirical failure: assuming a
+  parametric copula family for the joint dependence structure is
+  outside this library's nonparametric design** (spec section 3's EVT
+  provision is for marginal CDFs only, not the copula density). This
+  section's numbers now come from a saved run of
+  `notebooks/evt_splice_experiment.R`, executed once while the feature
+  still existed, rather than the (removed) live API — see "Does a true
+  EVT tail-splice..." above and `DECISIONS.md` for the full story. Of
+  all four interventions tried in this notebook, none resolves the
+  sharp Clayton/Gumbel corner under-fit in a way that would look
+  convincing up close, and the EVT splice's failure mode — correct
+  family, accurate theta, still a shape distortion — is arguably the
+  most representative finding of this whole notebook's investigation
+  into the genuine difficulties of high-dimensional, heavy-tailed
+  modeling.
