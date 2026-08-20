@@ -26,4 +26,5 @@ julia/Manifest.toml
 notebooks/*.html
 notebooks/*_files/
 notebooks/*_cache/
+notebooks/*.log
 

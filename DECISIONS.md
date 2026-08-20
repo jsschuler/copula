@@ -1339,3 +1339,22 @@ replication is affordable here in a way it wasn't for
   `corner_relief` value should not sit outside roughly 1-2 replicate
   standard deviations above 0) -- the same standard the degree-grid
   approach failed to meet.
+
+**Trial A result: GO.** At $n=2000$, `corner_relief=0.6` improved
+shape-correlation on BOTH worst edges (1->2 Clayton: 0.781 -> 0.785;
+7->8 Gumbel: 0.836 -> 0.840) AND improved held-out likelihood
+(`Delta_KL = -0.0496` vs. the `corner_relief=0` baseline -- negative
+means the `corner_relief=0.6` fit scored BETTER, not worse). This is the
+first intervention in this whole investigation that helped both metrics
+at once; plain degree escalation always paid for shape-correlation with
+worse held-out likelihood. Not monotonic, though: `corner_relief=0.3`
+was worse than baseline on both metrics, `0.8` and `0.9` kept improving
+`Delta_KL` but lost back some of `0.6`'s shape-correlation gain on edge
+1->2 specifically -- consistent with a real but non-trivial (not simply
+"more relief is better") relationship, and itself a reason a single-run
+sanity check isn't sufficient: a second quick spot-check at a different
+seed (smoke-testing Trial B's own script before the full launch, 1
+replicate at $n=2000$) already showed `corner_relief=0.3` AND `0.6` both
+scoring worse than baseline in `Delta_KL` -- the opposite ranking Trial A
+saw for those two values. Trial B (replicated) is what actually resolves
+this, not Trial A alone; launched immediately after this entry.
