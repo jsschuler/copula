@@ -981,50 +981,125 @@ ggplot(evt_cond_df, aes(u, density, color = source, linetype = source)) +
        x = expression(u[child]), y = "density")
 ```
 
-**Look at the plot, not just the correlation column: this does NOT fix
-the corner.** On all four edges the red (evt-spliced) curve sits almost
-on top of the blue (unspliced) curve and nowhere close to the true
-black spike's height or sharpness. The correlation gains in the table
-(e.g. 0.767 -> 0.821 on edge 1->2) are real and directionally
-consistent, and the gate now behaves correctly — it is a true no-op
-(identical curve, identical correlation) on every Frank/Gaussian/t
-edge, and `Delta_KL` is favorable overall (-0.14) rather than the
-mixed-to-negative value the miscalibrated bandwidth produced. But
-"real and directionally consistent" is a small, precise claim, and it
-should not be read as "fixed." The under-fit documented in "Known
-limitation" above is still there, visually, on every one of these four
-panels.
+**On this slice the two curves really are nearly indistinguishable —
+but that is a property of *where this slice sits*, not of whether the
+splice does anything at all.** `q = 0.1`/`0.9` is the slice used
+throughout this notebook (including the "Known limitation" plot above),
+but the splice's corner weight
+$w(u,z) = \exp(-(d_u^2 + d_z^2) / (2 \cdot \text{bandwidth}^2))$ is
+bounded above, on a slice at fixed $z$, by
+$\exp(-d_z^2 / (2 \cdot \text{bandwidth}^2))$ regardless of $u$. At
+`bandwidth = 0.08` and `z = 0.1`, that ceiling is only $\approx 0.46$,
+and the weight averages closer to $0.15$ across the plotted range — so
+on this particular slice the parametric term is never more than a
+minority contributor. The calibrated bandwidth concentrates the
+splice's action within roughly $0.1$–$0.15$ of the *exact* corner
+point, and `z = 0.1` isn't close enough to it for the splice to move
+the curve much. This is worth checking directly, at a slice that
+actually is close enough:
 
-**That is the actual headline finding of this whole exercise, and it is
-worth stating plainly.** This intervention used the objectively correct
-parametric family (confirmed: family selection matches the true
-generator exactly on all four edges) with an accurately fitted
-parameter (e.g. theta=2.40 vs. a true 3.0, theta=3.06 vs. a true 3.0)
-— the most theoretically well-motivated of the four interventions tried
-in this notebook — and it still only nudges the fit a little. The
-tightened bandwidth (0.08) that made the splice a correct no-op
-elsewhere and avoided the earlier bandwidth's active harm also confines
-its influence to a small enough region of the (u, z) square that
-Sinkhorn's global renormalization mostly pulls the result back toward
-the smoother, Bernstein-tensor-driven shape everywhere else. Widening
-the bandwidth to let the parametric piece dominate more of the corner
-was tried first and made things *worse* on 3 of these same 4 edges (see
-above) — so this is not simply "turn the dial further" territory; the
-dial has a narrow, already-found sweet spot, and even at that sweet
-spot the visual gap to the true spike remains large.
+```{r evt-splice-zoomed-corner, fig.height=8}
+u_zoom <- seq(0.01, 0.3, length.out = 60)
+evt_zoom_rows <- list()
+for (i in tail_edges) {
+  node <- i + 1L
+  is_gumbel <- i %in% c(2, 7)
+  q <- if (is_gumbel) 0.98 else 0.02 # right next to the actual corner, not 0.1/0.9
+  ug <- if (is_gumbel) 1 - u_zoom else u_zoom
+  fitted_fixed <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, node, ug, q))
+  fitted_evt <- exp(hdcd:::.local_fit_conditional_log_density(evt_fit, node, ug, q))
+  true_dens <- dCopula(cbind(rep(q, length(ug)), ug), families[[i]])
+  evt_zoom_rows[[length(evt_zoom_rows) + 1]] <- data.frame(
+    edge = sprintf("%d->%d  %s  (z = %.2f)", i, i + 1, family_names[i], q),
+    u = ug,
+    density = c(true_dens, fitted_fixed, fitted_evt),
+    source = rep(c("true", "hdcd (unspliced)", "hdcd (evt-spliced)"), each = length(ug))
+  )
+}
+evt_zoom_df <- do.call(rbind, evt_zoom_rows)
+
+ggplot(evt_zoom_df, aes(u, density, color = source, linetype = source)) +
+  geom_line(linewidth = 0.7) +
+  facet_wrap(~edge, scales = "free", ncol = 2) +
+  scale_color_manual(values = c("true" = "black", "hdcd (unspliced)" = "steelblue",
+                                 "hdcd (evt-spliced)" = "firebrick")) +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "top") +
+  labs(title = "Zoomed into the actual corner (z within 0.02 of 0 or 1)",
+       x = expression(u[child]), y = "density")
+```
+
+**This is where you should be looking, and it reveals a real effect —
+but not an improvement.** Right next to the true corner, the splice
+visibly moves the curve on every edge. But look at *how*: on the
+Clayton edges (left column), the evt-spliced curve actually dips
+*below* the unspliced fit immediately around the true peak, then rises
+to *overshoot* both the unspliced fit and the true density further out
+along the shoulder — the mirror image on the Gumbel edges (right
+column). A closer look at edge 1->2's exact fitted values makes this
+precise:
+
+```{r evt-splice-corner-numbers}
+u_fine <- seq(0.005, 0.3, length.out = 12)
+fitted_fixed <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, 2L, u_fine, 0.02))
+fitted_evt <- exp(hdcd:::.local_fit_conditional_log_density(evt_fit, 2L, u_fine, 0.02))
+true_dens <- dCopula(cbind(rep(0.02, length(u_fine)), u_fine), families[[1]])
+kable(data.frame(u = round(u_fine, 3), true = round(true_dens, 2),
+                  unspliced = round(fitted_fixed, 2), evt_spliced = round(fitted_evt, 2)),
+      caption = "Edge 1->2 (Clayton), conditional density at z=0.02, near the corner")
+```
+
+Right at the peak (`u` around 0.015-0.03) the evt-spliced density is
+*lower* than the unspliced fit, not higher — the opposite of what a
+corner-strengthening splice is supposed to do — before crossing over
+and overshooting the true density by roughly two orders of magnitude
+once `u` moves into the shoulder (true density is near 0 there; the
+splice pushes the fit up to several times the unspliced value). This
+is a genuine shape distortion, not simply "too small an effect."
+
+**A plausible explanation, not yet fully confirmed: Archimedean
+densities are highly sensitive to theta specifically *off* the u = z
+diagonal, deep in the corner.** The blend near the true corner is
+almost entirely the parametric term (weight $\approx 0.97$ at
+`u=0.005, z=0.02`), so its shape there is essentially the fitted
+Clayton/Gumbel density's own shape, at the MLE-estimated theta (e.g.
+2.40 vs. a true 3.0 on this edge) rather than the true theta. A
+theta estimate that looks close in absolute terms can still produce a
+meaningfully different conditional-density *profile* well off the
+diagonal (`u` far from `z`), where Archimedean families are most
+sensitive to theta — plausibly explaining both the peak undershoot
+(a lower theta concentrates less mass exactly at the corner) and the
+shoulder overshoot (a lower theta spreads more mass into the region
+just past it) simultaneously. This is offered as a hypothesis, not a
+proven mechanism — it has not been isolated by, for instance, re-running
+the splice with the true theta fixed instead of the MLE estimate.
+
+**Bottom line, updated after actually looking at the right place:**
+the splice is not simply "too weak to matter," as the `z=0.1`/`0.9`
+slice alone would suggest — it has a real, visible effect exactly where
+it's designed to act. But that effect is a distortion of the
+conditional density's shape (undershoot at the peak, overshoot in the
+shoulder) rather than a step toward the true corner spike, and the
+correlation/`Delta_KL` gains reported above are, apparently, driven more
+by this shoulder overshoot happening to correlate loosely with the true
+curve's overall decay than by any genuine reproduction of the corner
+itself.
 
 Of the four interventions attempted across this notebook —
 `lambda_roughness_grid` (ruled out entirely), `bernstein_degree_grid`
 (real shape gain, real likelihood cost), `corner_relief` (weak,
 noisy, directional evidence only), and now a true parametric EVT
-splice with the objectively correct family and an accurate fit — **none
-resolves the sharp Clayton/Gumbel corner under-fit** in a way that
-would be visually convincing to someone looking at the plot rather than
-a summary statistic. That negative result, arrived at only after
-actually building and correctly calibrating the most principled fix
-available, is a more informative finding for a paper about the genuine
-difficulties of high-dimensional, heavy-tailed modeling than a positive
-one would have been.
+splice with the objectively correct family and an accurate-looking
+fit — **none resolves the sharp Clayton/Gumbel corner under-fit** in a
+way that would be visually convincing up close. The EVT splice's
+failure mode is the most informative of the four: it shows that even
+getting the family and the point-estimate of theta right is not enough
+when the raw kernel blend is evaluated at fine resolution right where
+tail dependence concentrates, because the composed fit's local shape
+turns out to be far more sensitive to the residual MLE error than the
+theta-recovery numbers alone would suggest. That is a more useful
+finding for a paper about the genuine difficulties of high-dimensional,
+heavy-tailed modeling than a positive result would have been.
 
 # Summary
 

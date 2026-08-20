@@ -1626,3 +1626,55 @@ interventions tried across this whole investigation, none closes that
 gap in a way that would look convincing on a plot. That is the honest
 final state of this line of investigation, not a caveat to a
 success.
+
+**Further correction: the "small gap" framing above was itself too
+generous — the z=0.1/0.9 slice used for that check is not where the
+splice acts.** The corner weight $w(u,z) = \exp(-(d_u^2+d_z^2)/(2b^2))$
+at bandwidth $b=0.08$ is bounded, on a fixed-$z$ slice, by
+$\exp(-d_z^2/(2b^2))$ regardless of $u$ -- at $z=0.1$ that ceiling is
+only $\approx 0.46$ and the weight averages $\approx 0.15$ over the
+plotted range, so the parametric term was never more than a minority
+contributor on the slice used to reach that conclusion. Re-plotted at
+$z=0.02$/$0.98$ (within the bandwidth's effective range, weight up to
+$\approx 0.97$), the splice DOES produce a visible local effect on
+every edge -- but it is a genuine shape distortion, not a step toward
+the true corner spike: on edge 1->2 (Clayton, $z=0.02$), the exact
+fitted values are (u, true, unspliced, evt-spliced) = (0.005, 3.01,
+4.46, 1.14), (0.032, 18.61, 4.12, 3.29), (0.166, 0.04, 2.53, 2.41),
+(0.193, 0.02, 2.25, 2.74), (0.246, 0.01, 1.73, 2.61) -- the spliced fit
+is LOWER than the unspliced fit right where the true density peaks
+(u < 0.15ish), then CROSSES OVER and becomes HIGHER than the unspliced
+fit in the shoulder (u > 0.19ish) where the true density is
+essentially zero. Both effects move the fit further from a clean
+reproduction of the true spike, not closer -- undershooting the peak
+and overshooting the shoulder simultaneously.
+
+Leading (untested) hypothesis: near the true corner the blend weight is
+close to 1, so the fitted curve there is essentially the parametric
+Clayton/Gumbel density's OWN shape at the MLE-estimated theta (e.g.
+2.40 vs. a true 3.0 on this edge), not the true theta. Archimedean
+copula densities are known to be sensitive to theta specifically off
+the $u=z$ diagonal deep in the corner (exactly the region being
+plotted, since $u$ ranges over $[0.01,0.3]$ while $z$ is pinned at
+$0.02$) -- a theta that looks reasonably close on an absolute scale
+can still produce a genuinely different conditional-density *profile*
+there, plausibly explaining both the undershoot (lower theta =
+less mass concentrated exactly at the corner) and the overshoot
+(lower theta = more mass spread into the region just past it). Not
+isolated by experiment (e.g. re-running the splice with theta pinned
+to the true value instead of its MLE estimate) -- logged here as the
+leading candidate explanation, not a confirmed one.
+
+**Net effect on the earlier "necessary but not sufficient" framing:**
+it undersold the problem. This is not a case of a correct, if muted,
+improvement that simply doesn't go far enough -- it is a real,
+non-trivial shape distortion introduced by the splice, that happens to
+still net out as a small positive on a linear-correlation summary
+statistic (because the shoulder overshoot loosely tracks the true
+curve's monotonic decay well enough to help the correlation number,
+even though it moves the actual density further from the truth in
+absolute terms). The correlation/Delta_KL numbers reported earlier in
+this entry are accurate as computed, but should not be read as
+evidence the splice is "working, just modestly" -- the density plot at
+the correct (near-corner) slice is the honest picture, and it shows a
+distortion, not a muted win.
