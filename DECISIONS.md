@@ -1726,3 +1726,68 @@ rather than recomputed via the (now-removed) live API -- the same
 "commit a script + its results, load rather than recompute" pattern
 already used for the `n_sweep` and `corner_relief_sweep` experiments
 earlier in this investigation.
+
+**Standing design constraint, made explicit and verified: no parametric
+assumptions in the copula (dependence-structure) machinery, at all.**
+This generalizes beyond "don't fit Clayton/Gumbel at the corner" (the
+reason the EVT splice was removed, above) to a blanket rule for
+anything touching `hdcd_local_fit`/`hdcd_sinkhorn_fit`/the centered
+Bernstein basis: no step in fitting c_j(u | Pa(j)) may assume a named
+parametric copula family, anywhere, for any reason. This does NOT apply
+to the marginal-CDF EVT extension (spec section 3, generalized Pareto
+tails on each dimension's univariate `F_j(x)`) -- that is a different,
+spec-sanctioned part of the pipeline (marginal fitting, not the copula
+density) and is unaffected.
+
+Verified by audit (not just assumed) immediately after the EVT splice's
+removal: grepped `src/` and `include/` (excluding `src/marginal/`, which
+legitimately has GPD per spec section 3) for any other named-family or
+parametric-fitting code reachable from the copula-fitting path --
+`hdcd_tail_dependence_coefficient` is confirmed nonparametric/empirical
+(its own header says so), the dependence matrix uses distance
+correlation (Szekely/Rizzo dCor, not Pearson/Gaussian), and the only
+other "Gaussian"/"Frank" text in the codebase is illustrative comment
+prose about which edges the tail-dependence diagnostic correctly
+recognizes as NOT needing extra flexibility, not an actual fitted
+model. The EVT splice was the only place this constraint was ever
+violated, and it is now fully removed (see above).
+
+**Two nonparametric candidates were discussed as possible follow-ups
+for the still-unresolved sharp-corner under-fit — NO DECISION MADE, not
+started, logged for later:**
+
+- **(A) Local basis augmentation.** Instead of raising `bernstein_degree`
+  globally (the `bernstein_degree_grid` finding: real shape gain, real
+  held-out-likelihood cost, because most of the added coefficients are
+  spent on the already-well-fit bulk), add a small number of additional
+  basis functions concentrated only near the corner flagged by the same
+  `hdcd_tail_dependence_coefficient` diagnostic already used to gate
+  `bernstein_degree_grid`. Stays entirely inside the existing Theta
+  gradient-ascent fit -- no runtime blend of two separate models, no
+  Sinkhorn having to reconcile a hard handoff between two regimes (the
+  specific failure mechanism diagnosed in the EVT splice). Considered
+  the more promising of the two candidates: it directly targets why
+  `bernstein_degree_grid` paid a real likelihood cost (wasted capacity
+  in the smooth bulk) without needing any assumption about the corner's
+  shape.
+- **(B) Local (nonparametric) density correction.** Reuse the
+  corner-splice architecture already built and validated for the (now
+  removed) EVT feature -- corner weight, blend, Sinkhorn normalization
+  -- but replace the parametric Clayton/Gumbel MLE piece with a
+  genuinely nonparametric local density estimate (e.g. a 2D KDE fit only
+  on corner-region data). Plausibly avoids the EXACT failure mode
+  diagnosed for the EVT splice, because a local KDE's raw kernel is
+  unnormalized, like the Bernstein term it would blend with -- no scale
+  mismatch between an unnormalized and an already-normalized quantity
+  (the mechanism blamed for the EVT splice's undershoot/overshoot
+  distortion). The real, untested risk: the corner is exactly where
+  data is sparsest, so any local nonparametric estimate there is
+  inherently high-variance -- the textbook reason parametric tail models
+  exist in the first place. Would need a real risk/benefit test before
+  being worth building.
+
+Neither has been attempted. Revisit if/when there is appetite to keep
+pushing on the corner under-fit; otherwise "no intervention tried in
+this notebook resolves it" stands as this investigation's finding (see
+DECISIONS.md's EVT tail-splice entries above and the notebook's "Known
+limitation" section).
