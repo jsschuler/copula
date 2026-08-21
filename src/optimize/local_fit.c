@@ -35,6 +35,24 @@ typedef struct {
     size_t m;
     size_t n_parents;
     const double *theta; /* n_parents * (m+1)*(m+1); points at the owning hdcd_local_fit_t's theta */
+
+    /* Local nonparametric corner correction (see hdcd_local_fit_options_t
+     * and DECISIONS.md's "local nonparametric corner correction" entry).
+     * NULL corner_side means "no correction for any parent" -- the
+     * common case, costing nothing beyond one extra NULL check per
+     * kernel call. When non-NULL, length n_parents; a per-parent entry
+     * of HDCD_CORNER_NONE means that specific edge has no correction
+     * even though others might. train_u_kde/train_z_kde hold the TRAIN
+     * rows the correction is averaged over -- train_z_kde is n_parents
+     * contiguous blocks of n_train_kde each (parent k's block starts at
+     * train_z_kde + k*n_train_kde), train_u_kde is shared across parents
+     * (same rows, same child column). */
+    const hdcd_corner_side_t *corner_side;
+    const double *train_u_kde;
+    const double *train_z_kde;
+    size_t n_train_kde;
+    double corner_kde_bandwidth;
+    double corner_kde_weight;
 } kernel_userdata_t;
 
 struct hdcd_local_fit {
@@ -42,6 +60,9 @@ struct hdcd_local_fit {
     size_t *parent_order;      /* copy of caller's parents[], unmodified order */
     size_t m;                  /* Bernstein degree */
     double *theta;               /* n_parents * (m+1)*(m+1), concatenated per parent, row-major each */
+    hdcd_corner_side_t *corner_side; /* n_parents; owned; NULL if corner_kde_gate was 0 */
+    double *train_u_kde;              /* owned; NULL if corner_kde_gate was 0 */
+    double *train_z_kde;              /* owned; NULL if corner_kde_gate was 0 */
     /* Owned so it outlives this function: `sinkhorn` stores a pointer to
      * it internally and dereferences it on every future evaluation call,
      * not just during fitting -- it must live as long as `sinkhorn` does,
@@ -58,6 +79,63 @@ struct hdcd_local_fit {
     int theta_converged;
 };
 
+/* Corner-proximity taper for the local KDE correction below: a Gaussian
+ * bump in (u,z)-space centered on whichever corner `side` targets
+ * (HDCD_CORNER_LOWER: (0,0); HDCD_CORNER_UPPER: (1,1)), close to 1
+ * right at the corner and decaying to ~0 within a few `bandwidth`s of
+ * it. Same shape as corner_relief's edge_proximity (hdcd/bernstein.h)
+ * and the removed EVT splice's evt_corner_weight -- reused deliberately,
+ * not reinvented; see DECISIONS.md. */
+static double corner_proximity(double u, double z, hdcd_corner_side_t side, double bandwidth) {
+    double du, dz;
+    if (side == HDCD_CORNER_LOWER) {
+        du = u;
+        dz = z;
+    } else {
+        du = 1.0 - u;
+        dz = 1.0 - z;
+    }
+    return exp(-(du * du + dz * dz) / (2.0 * bandwidth * bandwidth));
+}
+
+/* A genuine (volume-normalized) bivariate Gaussian-product KDE at
+ * (u,z), averaged over a gated parent's TRAIN rows -- see
+ * DECISIONS.md's "local nonparametric corner correction" entry.
+ *
+ * IMPORTANT, corrected after an initial version dropped the 1/(2*pi*h^2)
+ * normalizing constant on the theory that it should stay "raw/
+ * uncalibrated" like the Bernstein term: that reasoning conflated two
+ * different things. The EVT splice's actual, diagnosed failure was
+ * combining terms via a GEOMETRIC BLEND IN LOG SPACE, where each term's
+ * absolute scale silently controlled its influence in a way nothing
+ * validated -- not "one term happened to be a calibrated density."
+ * Combining ADDITIVELY in RAW kernel space (see raw_kernel_callback
+ * below), after Bernstein's own exp() but before Sinkhorn, is what
+ * avoids that failure mode, regardless of whether the local term is
+ * itself volume-normalized. Dropping the normalizing constant here
+ * instead just made the correction ~1/(2*pi*h^2) times too small to
+ * matter at any realistic bandwidth (h=0.08 -> a ~20x undercount) --
+ * confirmed empirically: an uncorrected version of this function
+ * produced a fit numerically indistinguishable from having no
+ * correction at all, even directly at the corner. With the constant
+ * restored, this is an honest local density estimate, on a comparable
+ * order of magnitude to the quantity it's added to -- exactly what lets
+ * it actually compete in the sum. O(n_train_kde) per call: see the
+ * options struct's cost note. */
+static double local_kde_raw(double u, double z, const double *train_u, const double *train_z,
+                             size_t n_train_kde, double bandwidth) {
+    const double two_pi = 6.283185307179586;
+    double sum = 0.0;
+    double inv_h2 = 1.0 / (bandwidth * bandwidth);
+    for (size_t i = 0; i < n_train_kde; i++) {
+        double du = u - train_u[i];
+        double dz = z - train_z[i];
+        sum += exp(-0.5 * (du * du + dz * dz) * inv_h2);
+    }
+    double normalizing_const = 1.0 / (two_pi * bandwidth * bandwidth);
+    return (sum / (double)n_train_kde) * normalizing_const;
+}
+
 static double raw_kernel_callback(double u, const double *z, size_t z_dim, void *userdata) {
     const kernel_userdata_t *kd = (const kernel_userdata_t *)userdata;
     (void)z_dim;
@@ -70,7 +148,26 @@ static double raw_kernel_callback(double u, const double *z, size_t z_dim, void 
     }
     if (log_k > HDCD_LOCAL_FIT_LOG_KERNEL_CLIP) log_k = HDCD_LOCAL_FIT_LOG_KERNEL_CLIP;
     if (log_k < -HDCD_LOCAL_FIT_LOG_KERNEL_CLIP) log_k = -HDCD_LOCAL_FIT_LOG_KERNEL_CLIP;
-    return exp(log_k);
+    double raw_k = exp(log_k);
+
+    /* Local corner correction: additive in RAW kernel space, on the
+     * same uncalibrated footing as raw_k above -- never blended in log
+     * space against a normalized quantity. Summed across every gated
+     * parent (usually zero or one in this notebook's max_parents=2
+     * setting, but not assumed). */
+    if (kd->corner_side != NULL) {
+        for (size_t k = 0; k < kd->n_parents; k++) {
+            if (kd->corner_side[k] == HDCD_CORNER_NONE) {
+                continue;
+            }
+            double w = corner_proximity(u, z[k], kd->corner_side[k], kd->corner_kde_bandwidth);
+            double local = local_kde_raw(u, z[k], kd->train_u_kde,
+                                          kd->train_z_kde + k * kd->n_train_kde,
+                                          kd->n_train_kde, kd->corner_kde_bandwidth);
+            raw_k += kd->corner_kde_weight * w * local;
+        }
+    }
+    return raw_k;
 }
 
 /* Objective for one edge's Theta: <Theta, M> - lambda_R * R(Theta), R
@@ -184,7 +281,9 @@ static int fit_theta_edge(
 
 typedef struct {
     double *theta;                     /* owned; n_parents*(m+1)*(m+1) */
-    kernel_userdata_t *kernel_userdata; /* owned; ->theta aliases the field above */
+    double *train_u_kde;                 /* owned; NULL unless corner_side was supplied */
+    double *train_z_kde;                 /* owned; NULL unless corner_side was supplied */
+    kernel_userdata_t *kernel_userdata; /* owned; ->theta/->train_u_kde/->train_z_kde alias the fields above */
     hdcd_sinkhorn_t *sinkhorn;         /* owned */
     double score;                       /* mean held-out log-density on the score rows */
     double roughness_penalty;
@@ -198,9 +297,13 @@ static void local_fit_candidate_release(local_fit_candidate_t *c) {
     hdcd_sinkhorn_free(c->sinkhorn); /* must be freed before kernel_userdata, which it references */
     free(c->kernel_userdata);
     free(c->theta);
+    free(c->train_u_kde);
+    free(c->train_z_kde);
     c->sinkhorn = NULL;
     c->kernel_userdata = NULL;
     c->theta = NULL;
+    c->train_u_kde = NULL;
+    c->train_z_kde = NULL;
 }
 
 /*
@@ -222,6 +325,7 @@ static hdcd_status_t fit_and_score(
     const size_t *train_rows, size_t n_train_rows,
     const size_t *score_rows, size_t n_score_rows,
     size_t m, double lambda_r, double corner_relief,
+    const hdcd_corner_side_t *corner_side, double corner_kde_bandwidth, double corner_kde_weight,
     size_t theta_max_iter, double theta_tol,
     const hdcd_sinkhorn_options_t *sinkhorn_options,
     local_fit_candidate_t *out
@@ -233,19 +337,38 @@ static hdcd_status_t fit_and_score(
     double *z_samples = (double *)malloc((size_t)n_train_rows * n_parents * sizeof(double));
     double *grad_scratch = (double *)malloc(dim * dim * sizeof(double));
     double *theta = (double *)calloc(n_parents * dim * dim, sizeof(double));
-    if (m_stat == NULL || z_row == NULL || z_samples == NULL || grad_scratch == NULL || theta == NULL) {
+    /* Only allocated when corner_side is non-NULL (some parent gated);
+     * otherwise these stay NULL and cost nothing beyond the check. */
+    double *train_u_kde = NULL;
+    double *train_z_kde = NULL;
+    if (corner_side != NULL) {
+        train_u_kde = (double *)malloc(n_train_rows * sizeof(double));
+        train_z_kde = (double *)malloc(n_train_rows * n_parents * sizeof(double));
+    }
+    if (m_stat == NULL || z_row == NULL || z_samples == NULL || grad_scratch == NULL || theta == NULL
+        || (corner_side != NULL && (train_u_kde == NULL || train_z_kde == NULL))) {
         free(m_stat); free(z_row); free(z_samples); free(grad_scratch); free(theta);
+        free(train_u_kde); free(train_z_kde);
         return HDCD_ERROR_ALLOCATION;
     }
 
     /* Sufficient statistics M_jk, MEAN (not sum) over train_rows -- see
-     * the comment on the analogous loop below for why. */
+     * the comment on the analogous loop below for why. train_u_kde/
+     * train_z_kde (when needed) are built here too, in TRANSPOSED
+     * layout (contiguous per parent) rather than z_samples' interleaved
+     * layout, for cache-friendly summation in local_kde_raw(). */
     for (size_t i = 0; i < n_train_rows; i++) {
         size_t row = train_rows[i];
         double u_val = u[child * n + row];
+        if (train_u_kde != NULL) {
+            train_u_kde[i] = u_val;
+        }
         for (size_t k = 0; k < n_parents; k++) {
             double z_val = u[parents[k] * n + row];
             z_samples[i * n_parents + k] = z_val;
+            if (train_z_kde != NULL) {
+                train_z_kde[k * n_train_rows + i] = z_val;
+            }
             hdcd_bernstein_tensor_gradient(u_val, z_val, m, grad_scratch);
             double *m_k = &m_stat[k * dim * dim];
             for (size_t e = 0; e < dim * dim; e++) {
@@ -279,11 +402,19 @@ static hdcd_status_t fit_and_score(
         free(z_row);
         free(z_samples);
         free(theta);
+        free(train_u_kde);
+        free(train_z_kde);
         return HDCD_ERROR_ALLOCATION;
     }
     kd->m = m;
     kd->n_parents = n_parents;
     kd->theta = theta;
+    kd->corner_side = corner_side;
+    kd->train_u_kde = train_u_kde;
+    kd->train_z_kde = train_z_kde;
+    kd->n_train_kde = n_train_rows;
+    kd->corner_kde_bandwidth = corner_kde_bandwidth;
+    kd->corner_kde_weight = corner_kde_weight;
 
     hdcd_sinkhorn_t *sk = NULL;
     hdcd_status_t sinkhorn_status = hdcd_sinkhorn_fit(
@@ -294,6 +425,8 @@ static hdcd_status_t fit_and_score(
         free(z_row);
         free(kd);
         free(theta);
+        free(train_u_kde);
+        free(train_z_kde);
         return sinkhorn_status;
     }
 
@@ -321,10 +454,14 @@ static hdcd_status_t fit_and_score(
         hdcd_sinkhorn_free(sk);
         free(kd);
         free(theta);
+        free(train_u_kde);
+        free(train_z_kde);
         return score_status;
     }
 
     out->theta = theta;
+    out->train_u_kde = train_u_kde;
+    out->train_z_kde = train_z_kde;
     out->kernel_userdata = kd;
     out->sinkhorn = sk;
     out->score = sum_loglik / (double)n_score_rows;
@@ -392,6 +529,15 @@ hdcd_status_t hdcd_local_fit_node(
             return HDCD_ERROR_INVALID_ARGUMENT;
         }
         if (!(options->corner_relief >= 0.0) || options->corner_relief >= 1.0) {
+            return HDCD_ERROR_INVALID_ARGUMENT;
+        }
+        if (!(options->corner_kde_gate >= 0.0) || options->corner_kde_gate > 1.0) {
+            return HDCD_ERROR_INVALID_ARGUMENT;
+        }
+        if (options->corner_kde_gate > 0.0 && options->corner_kde_bandwidth < 0.0) {
+            return HDCD_ERROR_INVALID_ARGUMENT;
+        }
+        if (options->corner_kde_gate > 0.0 && options->corner_kde_weight < 0.0) {
             return HDCD_ERROR_INVALID_ARGUMENT;
         }
     }
@@ -532,6 +678,63 @@ hdcd_status_t hdcd_local_fit_node(
     int degree_search_active = degree_grid_enabled
         && ((options->tail_dependence_gate <= 0.0) || (max_tail_dep >= options->tail_dependence_gate));
 
+    /* Local nonparametric corner correction gating (see
+     * hdcd_local_fit_options_t and DECISIONS.md's "local nonparametric
+     * corner correction" entry). Recomputes tail-dependence coefficients
+     * independently of the diagnostic block above (a known, minor
+     * redundant-computation cost when both are active, not a
+     * correctness issue -- the same accepted tradeoff the removed EVT
+     * splice used, and bernstein_degree_grid's own gate above). Default
+     * bandwidth/weight below are explicitly NOT calibrated -- there is
+     * no evidence yet for what "good" values are, unlike the EVT
+     * splice's 0.08 (which WAS empirically calibrated before removal).
+     * Per DECISIONS.md's "manual, iterative tuning" workflow, callers
+     * are expected to supply both explicitly and adjust by hand; these
+     * are only a non-zero fallback so corner_kde_gate > 0 with the
+     * other two left at 0 does not silently misbehave. */
+    double corner_kde_bandwidth = 0.1;
+    double corner_kde_weight = 1.0;
+    if (options->corner_kde_gate > 0.0) {
+        fit->corner_side = (hdcd_corner_side_t *)malloc(n_parents * sizeof(hdcd_corner_side_t));
+        double *kde_col_child = (double *)malloc(n_usable * sizeof(double));
+        double *kde_col_parent = (double *)malloc(n_usable * sizeof(double));
+        if (fit->corner_side == NULL || kde_col_child == NULL || kde_col_parent == NULL) {
+            free(kde_col_child); free(kde_col_parent);
+            free(usable_rows);
+            hdcd_local_fit_free(fit);
+            return HDCD_ERROR_ALLOCATION;
+        }
+        if (options->corner_kde_bandwidth > 0.0) {
+            corner_kde_bandwidth = options->corner_kde_bandwidth;
+        }
+        if (options->corner_kde_weight > 0.0) {
+            corner_kde_weight = options->corner_kde_weight;
+        }
+        for (size_t i = 0; i < n_usable; i++) {
+            kde_col_child[i] = u[child * n + usable_rows[i]];
+        }
+        for (size_t k = 0; k < n_parents; k++) {
+            fit->corner_side[k] = HDCD_CORNER_NONE;
+            for (size_t i = 0; i < n_usable; i++) {
+                kde_col_parent[i] = u[parents[k] * n + usable_rows[i]];
+            }
+            double lam_upper, lam_lower;
+            hdcd_status_t td_status = hdcd_tail_dependence_coefficient(
+                kde_col_child, kde_col_parent, n_usable, options->tail_dependence_k, &lam_upper, &lam_lower
+            );
+            if (td_status != HDCD_OK) {
+                continue; /* not enough usable rows: treated as "no tail evidence" */
+            }
+            double strongest = (lam_upper > lam_lower) ? lam_upper : lam_lower;
+            if (strongest < options->corner_kde_gate) {
+                continue;
+            }
+            fit->corner_side[k] = (lam_lower >= lam_upper) ? HDCD_CORNER_LOWER : HDCD_CORNER_UPPER;
+        }
+        free(kde_col_child);
+        free(kde_col_parent);
+    }
+
     size_t degree_candidates_buf[1];
     const size_t *degree_candidates;
     size_t n_degree_candidates;
@@ -600,6 +803,7 @@ hdcd_status_t hdcd_local_fit_node(
                     inner_rows, n_inner_train,
                     inner_rows + n_inner_train, n_inner_val,
                     degree_candidates[di], lambda_candidates[li], options->corner_relief,
+                    fit->corner_side, corner_kde_bandwidth, corner_kde_weight,
                     theta_max_iter, theta_tol,
                     &options->sinkhorn_options, &cand
                 );
@@ -649,6 +853,7 @@ hdcd_status_t hdcd_local_fit_node(
         usable_rows, n_train,
         usable_rows + n_train, n_holdout,
         fit->m, lambda_to_use, options->corner_relief,
+        fit->corner_side, corner_kde_bandwidth, corner_kde_weight,
         theta_max_iter, theta_tol,
         &options->sinkhorn_options, &production
     );
@@ -662,6 +867,8 @@ hdcd_status_t hdcd_local_fit_node(
     }
 
     fit->theta = production.theta;
+    fit->train_u_kde = production.train_u_kde;
+    fit->train_z_kde = production.train_z_kde;
     fit->kernel_userdata = production.kernel_userdata;
     fit->sinkhorn = production.sinkhorn;
     fit->holdout_score = production.score;
@@ -682,8 +889,11 @@ void hdcd_local_fit_free(hdcd_local_fit_t *fit) {
     }
     free(fit->parent_order);
     hdcd_sinkhorn_free(fit->sinkhorn); /* must be freed before kernel_userdata, which it references */
-    free(fit->kernel_userdata); /* does not own ->theta, no double free below */
+    free(fit->kernel_userdata); /* does not own ->theta/->train_u_kde/->train_z_kde, no double free below */
     free(fit->theta);
+    free(fit->corner_side);
+    free(fit->train_u_kde);
+    free(fit->train_z_kde);
     free(fit);
 }
 
@@ -725,6 +935,13 @@ size_t hdcd_local_fit_selected_bernstein_degree(const hdcd_local_fit_t *fit) {
 
 double hdcd_local_fit_max_tail_dependence(const hdcd_local_fit_t *fit) {
     return (fit != NULL) ? fit->max_tail_dependence : NAN;
+}
+
+hdcd_corner_side_t hdcd_local_fit_corner_side(const hdcd_local_fit_t *fit, size_t parent_idx) {
+    if (fit == NULL || fit->corner_side == NULL || parent_idx >= fit->n_parents) {
+        return HDCD_CORNER_NONE;
+    }
+    return fit->corner_side[parent_idx];
 }
 
 int hdcd_local_fit_theta_converged(const hdcd_local_fit_t *fit) {

@@ -165,6 +165,12 @@ class HdcdLocalFitOptions(Structure):
         # penalty"). 0.0 (the ctypes zero default) recovers the original
         # uniform penalty exactly.
         ("corner_relief", c_double),
+        # Local nonparametric corner correction (see DECISIONS.md's
+        # "local nonparametric corner correction" entry). 0.0 (the
+        # ctypes zero default) disables it entirely.
+        ("corner_kde_gate", c_double),
+        ("corner_kde_bandwidth", c_double),
+        ("corner_kde_weight", c_double),
     ]
 
 

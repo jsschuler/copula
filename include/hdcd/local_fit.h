@@ -10,6 +10,20 @@
 extern "C" {
 #endif
 
+/* Which corner of the (u,z) unit square a gated parent edge's local
+ * nonparametric correction (see hdcd_local_fit_options_t's
+ * corner_kde_gate/bandwidth/weight) targets. NOT a parametric family --
+ * see DECISIONS.md's "local nonparametric corner correction" entry for
+ * why this replaced the earlier (removed) copula-level EVT tail-splice,
+ * which assumed a named parametric family and was removed for exactly
+ * that reason. This enum only records a LOCATION, not a distributional
+ * shape. */
+typedef enum {
+    HDCD_CORNER_NONE = 0,
+    HDCD_CORNER_LOWER = 1, /* (u,z) -> (0,0); lower-tail dependence */
+    HDCD_CORNER_UPPER = 2  /* (u,z) -> (1,1); upper-tail dependence */
+} hdcd_corner_side_t;
+
 typedef struct hdcd_local_fit_options {
     size_t bernstein_degree;   /* m: Bernstein degree for every edge into this node (spec section 9) */
     double lambda_roughness;    /* lambda_R; must be > 0 when lambda_roughness_grid is NOT
@@ -126,6 +140,82 @@ typedef struct hdcd_local_fit_options {
      * DECISIONS.md for why, and for the logged follow-up of extending
      * it to one. */
     double corner_relief;
+
+    /* Optional: a local NONPARAMETRIC corner correction (see
+     * DECISIONS.md's "local nonparametric corner correction" entry) --
+     * the successor to the removed copula-level EVT tail-splice, built
+     * to fix the same corner under-fit without assuming a parametric
+     * family (spec-adjacent constraint: this library's copula/
+     * dependence-structure machinery must never assume a named
+     * distributional family -- see DECISIONS.md's "no parametric
+     * copula assumptions" entry). Where the EVT splice blended in a
+     * fitted Clayton/Gumbel density, this blends in a raw, UNNORMALIZED
+     * local kernel-density estimate built directly from nearby TRAIN
+     * rows -- no family, no fitted parameter, just local averaging.
+     *
+     * `corner_kde_gate = 0` (the default) disables this entirely:
+     * behavior is exactly as if these fields did not exist -- fully
+     * backward compatible.
+     *
+     * When > 0: for each parent edge, hdcd_tail_dependence_coefficient()
+     * is estimated exactly as for bernstein_degree_grid/the removed EVT
+     * splice's gate (over ALL of O_j(P_j), train and holdout both -- a
+     * descriptive diagnostic, not a fitted parameter). If the larger of
+     * that edge's (lambda_upper, lambda_lower) is >= `corner_kde_gate`,
+     * that edge's corner side is recorded (HDCD_CORNER_LOWER if
+     * lambda_lower is larger, HDCD_CORNER_UPPER otherwise -- see
+     * hdcd_corner_side_t) and its raw kernel gets an additive local
+     * correction near that corner; gated-out edges are unaffected, at
+     * zero extra cost.
+     *
+     * The correction itself, evaluated at any (u,z) query point during
+     * Sinkhorn fitting/scoring: a genuine, volume-normalized bivariate
+     * Gaussian-product KDE over the gated edge's TRAIN (u_child,
+     * z_parent) pairs near (u,z) -- a real local density estimate, not
+     * an arbitrarily-scaled quantity (an earlier version dropped the
+     * normalizing constant, reasoning it should stay "uncalibrated
+     * like the Bernstein term"; that made the correction numerically
+     * negligible at any realistic bandwidth and was corrected -- see
+     * local_kde_raw()'s comment in local_fit.c). What actually avoids
+     * the EVT splice's undershoot/overshoot distortion is combining in
+     * RAW KERNEL SPACE, ADDITIVELY, rather than as a geometric blend in
+     * log space (see DECISIONS.md's "local nonparametric corner
+     * correction" entry) -- not the local term's own scale:
+     *   raw_kernel_combined(u,z) = raw_kernel_bernstein(u,z)
+     *     + corner_kde_weight * corner_proximity(u,z) * local_kde_raw(u,z)
+     * where corner_proximity is the same Gaussian-bump corner-distance
+     * taper the EVT splice used (bounded in [0,1], ~1 at the exact
+     * corner, decaying within a few `corner_kde_bandwidth`s of it), so
+     * the correction's influence fades smoothly away from the corner
+     * without needing a hard cutoff. Sinkhorn then normalizes the
+     * COMBINED raw kernel exactly as it always does -- normalization is
+     * guaranteed regardless of how the raw kernel was constructed; it
+     * says nothing about whether the result fits well, which is why
+     * this is validated empirically (held-out log-likelihood AND a
+     * held-out conditional-histogram check), not assumed.
+     *
+     * `corner_kde_bandwidth` controls BOTH the corner-proximity taper's
+     * width and the local KDE's own smoothing width (one FIXED scalar
+     * for v1, not itself grid-searched, matching corner_relief's
+     * scope); 0 selects a default. `corner_kde_weight` scales the raw
+     * correction's overall contribution; 0 selects a default. Per
+     * DECISIONS.md's "manual, iterative tuning" workflow, BOTH are
+     * meant to be set explicitly by the caller and adjusted by hand
+     * across repeated hdcd_dag_fit calls, never auto-searched by this
+     * library -- there is deliberately no *_grid variant of either
+     * field, unlike lambda_roughness/bernstein_degree above.
+     *
+     * Cost note: unlike the removed EVT splice's O(1) closed-form
+     * parametric density, this is an O(n_train) sum per raw-kernel
+     * evaluation for each gated edge -- Sinkhorn's fitting/scoring
+     * queries the raw kernel many times, so this is real, non-negligible
+     * per-node cost. Like the EVT splice before it, this is
+     * deliberately excluded from hdcd_run_annealing for that reason --
+     * meant for hdcd_dag_fit calls on an already-decided DAG, not the
+     * search itself. */
+    double corner_kde_gate;
+    double corner_kde_bandwidth;
+    double corner_kde_weight;
 } hdcd_local_fit_options_t;
 
 /* One node's fitted conditional copula factor c_j(u_j | u_Pa(j)). */
@@ -211,6 +301,14 @@ size_t hdcd_local_fit_selected_bernstein_degree(const hdcd_local_fit_t *fit);
  * from tune" entry. NAN only for a root node (no parent edge to
  * diagnose) or a NULL fit. */
 double hdcd_local_fit_max_tail_dependence(const hdcd_local_fit_t *fit);
+
+/* The corner side (see hdcd_corner_side_t) the local nonparametric
+ * correction targets on parent edge `parent_idx` (in
+ * hdcd_local_fit_parent_order()'s order): HDCD_CORNER_NONE if
+ * corner_kde_gate was 0/disabled, or that edge's tail-dependence
+ * coefficient did not clear the gate. HDCD_CORNER_NONE for an
+ * out-of-range parent_idx or a NULL fit. */
+hdcd_corner_side_t hdcd_local_fit_corner_side(const hdcd_local_fit_t *fit, size_t parent_idx);
 
 int hdcd_local_fit_theta_converged(const hdcd_local_fit_t *fit);
 int hdcd_local_fit_sinkhorn_converged(const hdcd_local_fit_t *fit); /* 1 for a root node (nothing to converge) */

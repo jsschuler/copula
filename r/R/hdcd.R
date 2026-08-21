@@ -75,13 +75,15 @@
                         seed, theta_max_iterations = 0L, theta_tol = 0,
                         lambda_roughness_grid = numeric(0), roughness_validation_fraction = 0,
                         bernstein_degree_grid = integer(0), tail_dependence_gate = 0,
-                        tail_dependence_k = 0L, corner_relief = 0) {
+                        tail_dependence_k = 0L, corner_relief = 0,
+                        corner_kde_gate = 0, corner_kde_bandwidth = 0, corner_kde_weight = 0) {
   .Call("hdcd_r_dag_fit", u, as.integer(n), as.integer(d), dag_ext,
         as.integer(bernstein_degree), as.double(lambda_roughness), as.double(holdout_fraction),
         as.integer(seed), as.integer(theta_max_iterations), as.double(theta_tol),
         as.double(lambda_roughness_grid), as.double(roughness_validation_fraction),
         as.integer(bernstein_degree_grid), as.double(tail_dependence_gate),
-        as.integer(tail_dependence_k), as.double(corner_relief))
+        as.integer(tail_dependence_k), as.double(corner_relief),
+        as.double(corner_kde_gate), as.double(corner_kde_bandwidth), as.double(corner_kde_weight))
 }
 
 .dag_fit_joint_log_density <- function(dag_fit_ext, u_point) {
@@ -122,6 +124,10 @@
 
 .local_fit_max_tail_dependence <- function(dag_fit_ext, node_1idx) {
   .Call("hdcd_r_local_fit_max_tail_dependence", dag_fit_ext, as.integer(node_1idx))
+}
+
+.local_fit_corner_side <- function(dag_fit_ext, node_1idx, parent_1idx) {
+  .Call("hdcd_r_local_fit_corner_side", dag_fit_ext, as.integer(node_1idx), as.integer(parent_1idx))
 }
 
 .local_fit_conditional_log_density <- function(dag_fit_ext, node_1idx, u, z) {
@@ -198,6 +204,34 @@
 #'   reason to let the search and the final fit disagree on it). A FIXED
 #'   scalar for v1, not itself grid-searched. Default `0` recovers the
 #'   original uniform roughness penalty exactly.
+#' @param corner_kde_gate in `[0,1]` (see DECISIONS.md's "local
+#'   nonparametric corner correction" entry): the successor to the
+#'   removed copula-level EVT tail-splice, built to fix the same corner
+#'   under-fit WITHOUT assuming a parametric family. When a parent
+#'   edge's tail-dependence coefficient clears this gate, a raw,
+#'   deliberately UNNORMALIZED local kernel-density estimate -- built
+#'   directly from nearby training rows, no fitted family or parameter
+#'   -- is added into that edge's raw kernel near the corner, on the
+#'   same uncalibrated footing as the Bernstein kernel itself. Like
+#'   `bernstein_degree_grid` (and UNLIKE `corner_relief`), this is
+#'   deliberately excluded from the annealing search (real per-node
+#'   cost, not `corner_relief`'s near-free reweighting) -- applies only
+#'   to the final reference-DAG fit. Default `0` disables this entirely.
+#'   Per DECISIONS.md's "manual, iterative tuning" workflow, this and
+#'   `corner_kde_bandwidth`/`corner_kde_weight` are meant to be set
+#'   explicitly and adjusted by hand across repeated [hdcd_fit_dag()]
+#'   calls -- there is deliberately no grid-searched variant of any of
+#'   the three, unlike `lambda_roughness`/`bernstein_degree` above.
+#' @param corner_kde_bandwidth controls both the corner-proximity
+#'   taper's width and the local KDE's own smoothing width; only used
+#'   when `corner_kde_gate` is positive. `0` selects a small, explicitly
+#'   NOT-yet-calibrated default -- there is no evidence yet for what a
+#'   "good" value is, unlike `corner_relief`'s or the removed EVT
+#'   splice's defaults, which were empirically calibrated before use.
+#' @param corner_kde_weight scales the local correction's overall
+#'   contribution; only used when `corner_kde_gate` is positive. `0`
+#'   selects a default of `1` (equal footing with the Bernstein term) --
+#'   likewise not yet calibrated.
 #' @return an object of class `hdcd_model`.
 #' @export
 hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
@@ -208,7 +242,8 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
                       p_add = 1.0, p_remove = 1.0, p_swap = 1.0,
                       lambda_roughness_grid = numeric(0), roughness_validation_fraction = 0,
                       bernstein_degree_grid = integer(0), tail_dependence_gate = 0,
-                      tail_dependence_k = 0L, corner_relief = 0) {
+                      tail_dependence_k = 0L, corner_relief = 0,
+                      corner_kde_gate = 0, corner_kde_bandwidth = 0, corner_kde_weight = 0) {
   X <- as.matrix(X)
   storage.mode(X) <- "double"
   n <- nrow(X)
@@ -241,7 +276,10 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
                              bernstein_degree_grid = bernstein_degree_grid,
                              tail_dependence_gate = tail_dependence_gate,
                              tail_dependence_k = tail_dependence_k,
-                             corner_relief = corner_relief)
+                             corner_relief = corner_relief,
+                             corner_kde_gate = corner_kde_gate,
+                             corner_kde_bandwidth = corner_kde_bandwidth,
+                             corner_kde_weight = corner_kde_weight)
 
   model <- list(
     marginals = marginals,
@@ -261,6 +299,9 @@ hdcd_fit <- function(X, max_parents = 2L, bernstein_degree = 3L,
     tail_dependence_gate = tail_dependence_gate,
     tail_dependence_k = tail_dependence_k,
     corner_relief = corner_relief,
+    corner_kde_gate = corner_kde_gate,
+    corner_kde_bandwidth = corner_kde_bandwidth,
+    corner_kde_weight = corner_kde_weight,
     best_score = annealed$score,
     score_trace = annealed$score_trace,
     accepted_trace = annealed$accepted_trace,
@@ -413,6 +454,17 @@ hdcd_dag <- function(model) {
 #'   own setting.
 #' @param tail_dependence_k optional override; defaults to `model`'s own
 #'   setting.
+#' @param corner_kde_gate,corner_kde_bandwidth,corner_kde_weight optional
+#'   overrides of the local nonparametric corner correction (see
+#'   [hdcd_fit()]); default to reusing whatever `model` itself was fit
+#'   with. This is the intended entry point for the manual, iterative
+#'   tuning loop in DECISIONS.md's "manual, iterative tuning" entry:
+#'   call [hdcd_fit()] once with these left at their defaults (an
+#'   untuned initial fit), then call this function repeatedly with
+#'   different `corner_kde_bandwidth`/`corner_kde_weight` values by
+#'   hand, inspecting the result after each call (e.g. against
+#'   [hdcd_score_dag()] and a held-out conditional-histogram check)
+#'   rather than searching them automatically.
 #' @return an object of class `hdcd_dag_fit`; pass it to
 #'   [hdcd_score_dag()] to compare against `model`'s reference DAG.
 #' @export
@@ -422,7 +474,10 @@ hdcd_fit_dag <- function(model, candidate_edges,
                           bernstein_degree_grid = model$bernstein_degree_grid,
                           tail_dependence_gate = model$tail_dependence_gate,
                           tail_dependence_k = model$tail_dependence_k,
-                          corner_relief = model$corner_relief) {
+                          corner_relief = model$corner_relief,
+                          corner_kde_gate = model$corner_kde_gate,
+                          corner_kde_bandwidth = model$corner_kde_bandwidth,
+                          corner_kde_weight = model$corner_kde_weight) {
   stopifnot(inherits(model, "hdcd_model"))
   if (is.null(candidate_edges) || length(candidate_edges) == 0) {
     parents_1idx <- integer(0)
@@ -438,6 +493,9 @@ hdcd_fit_dag <- function(model, candidate_edges,
   if (is.null(tail_dependence_gate)) tail_dependence_gate <- 0
   if (is.null(tail_dependence_k)) tail_dependence_k <- 0L
   if (is.null(corner_relief)) corner_relief <- 0
+  if (is.null(corner_kde_gate)) corner_kde_gate <- 0
+  if (is.null(corner_kde_bandwidth)) corner_kde_bandwidth <- 0
+  if (is.null(corner_kde_weight)) corner_kde_weight <- 0
   dag_ext <- .dag_from_edges(model$d, model$max_parents, parents_1idx, children_1idx)
   fit_ext <- .dag_fit_c(model$U, nrow(model$U), model$d, dag_ext,
                          model$bernstein_degree, model$lambda_roughness, model$holdout_fraction,
@@ -447,7 +505,10 @@ hdcd_fit_dag <- function(model, candidate_edges,
                          bernstein_degree_grid = bernstein_degree_grid,
                          tail_dependence_gate = tail_dependence_gate,
                          tail_dependence_k = tail_dependence_k,
-                         corner_relief = corner_relief)
+                         corner_relief = corner_relief,
+                         corner_kde_gate = corner_kde_gate,
+                         corner_kde_bandwidth = corner_kde_bandwidth,
+                         corner_kde_weight = corner_kde_weight)
   structure(list(dag = dag_ext, dag_fit = fit_ext), class = "hdcd_dag_fit")
 }
 
@@ -535,6 +596,23 @@ hdcd_node_tail_dependence <- function(model, node) {
   .local_fit_max_tail_dependence(model$dag_fit, node)
 }
 
+#' The corner side the local nonparametric correction targets on one parent edge
+#'
+#' `"none"` if `corner_kde_gate` was never supplied, or that edge's
+#' tail-dependence coefficient did not clear the gate. See DECISIONS.md's
+#' "local nonparametric corner correction" entry.
+#'
+#' @param model an `hdcd_model` (or the result of [hdcd_fit_dag()]).
+#' @param node the 1-indexed column index of the node.
+#' @param parent the 1-indexed position within [hdcd_node_parents()]'s
+#'   order (NOT a global column index).
+#' @return one of `"none"`, `"lower"`, `"upper"`.
+#' @export
+hdcd_node_corner_side <- function(model, node, parent) {
+  stopifnot(inherits(model, "hdcd_model") || inherits(model, "hdcd_dag_fit"))
+  .local_fit_corner_side(model$dag_fit, node, parent)
+}
+
 #' Diagnose an initial (untuned) fit for tail-dependence corner risk
 #'
 #' Reports every node's [hdcd_node_tail_dependence()] coefficient -- the
@@ -583,6 +661,53 @@ hdcd_diagnose <- function(model) {
   }
   out <- do.call(rbind, rows)
   out[order(-out$tail_dependence), , drop = FALSE]
+}
+
+#' Region-restricted held-out log-likelihood for one node
+#'
+#' [hdcd_score_dag()]/`Delta_KL` are POOLED over every row a node sees --
+#' exactly the property that let the removed EVT tail-splice's local
+#' corner distortion hide inside a favorable aggregate score (see
+#' DECISIONS.md). This restricts the same held-out log-density
+#' evaluation to rows whose `parent`-th value falls within `z_window` of
+#' `z_center`, so a correction's effect can be checked specifically
+#' where it's supposed to act, not diluted by the rest of the domain.
+#'
+#' Intended for the manual, iterative tuning loop (DECISIONS.md's
+#' "manual, iterative tuning" entry): pass rows from an INNER-validation
+#' split while adjusting `corner_kde_bandwidth`/`corner_kde_weight` by
+#' hand, and rows from a genuinely untouched OUTER holdout (data never
+#' passed to any [hdcd_fit_dag()] call at all -- see that entry for how
+#' to carve one out) for the one honest final check once satisfied.
+#'
+#' @param model an `hdcd_model` (or the result of [hdcd_fit_dag()]).
+#' @param node the 1-indexed column index of the node being scored.
+#' @param parent the 1-indexed position within [hdcd_node_parents()]'s
+#'   order -- which parent's value defines the conditioning region.
+#' @param u_holdout numeric vector: the child's observed values for the
+#'   held-out rows being scored.
+#' @param z_holdout a matrix (rows = same held-out rows as `u_holdout`,
+#'   columns = this node's parents, in [hdcd_node_parents()]'s order).
+#' @param z_center,z_window only rows with
+#'   `abs(z_holdout[, parent] - z_center) <= z_window` are scored.
+#' @return a list with `mean_log_density` (`NA` if no rows fall in the
+#'   band) and `n` (the effective sample size actually used -- always
+#'   report this alongside the score, since a small `n` means "can't
+#'   tell," not a trustworthy number).
+#' @export
+hdcd_node_region_score <- function(model, node, parent, u_holdout, z_holdout, z_center, z_window) {
+  stopifnot(inherits(model, "hdcd_model") || inherits(model, "hdcd_dag_fit"))
+  z_holdout <- as.matrix(z_holdout)
+  in_band <- abs(z_holdout[, parent] - z_center) <= z_window
+  n <- sum(in_band)
+  if (n == 0) {
+    return(list(mean_log_density = NA_real_, n = 0L))
+  }
+  idx <- which(in_band)
+  log_c <- vapply(idx, function(i) {
+    .local_fit_conditional_log_density(model$dag_fit, node, u_holdout[i], z_holdout[i, ])
+  }, numeric(1))
+  list(mean_log_density = mean(log_c), n = n)
 }
 
 #' Conditional copula density c_j(u | z) for one node, over a grid of u

@@ -215,6 +215,77 @@ test_that("corner_relief changes the fit and defaults to a no-op", {
   expect_s3_class(candidate, "hdcd_dag_fit")
 })
 
+test_that("corner_kde_gate selects a corner side and defaults to a no-op", {
+  X <- make_tail_dependent_chain_data(seed = 24)
+
+  flat <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
+                    annealing_iterations = 60L, seed = 8L)
+  expect_equal(flat$corner_kde_gate, 0)
+  expect_equal(hdcd_node_corner_side(flat, 2, 1), "none")
+
+  # corner_kde_gate is excluded from annealing (real per-node KDE cost,
+  # unlike corner_relief), so isolate its effect via hdcd_fit_dag() on a
+  # FIXED structure, same reasoning as the bernstein_degree_grid test.
+  true_structure <- hdcd_dag(flat)
+  gated <- hdcd_fit_dag(flat, true_structure,
+                         corner_kde_gate = 0.1, corner_kde_bandwidth = 0.08, corner_kde_weight = 10)
+  expect_s3_class(gated, "hdcd_dag_fit")
+
+  found_side <- FALSE
+  for (node in 2:3) {
+    n_parents <- length(hdcd_node_parents(flat, node))
+    for (p in seq_len(n_parents)) {
+      side <- hdcd_node_corner_side(gated, node, p)
+      expect_true(side %in% c("none", "lower", "upper"))
+      if (side != "none") found_side <- TRUE
+    }
+  }
+  expect_true(found_side)
+
+  # A large enough weight must measurably change the fit relative to the
+  # uncorrected candidate -- otherwise the option would be a silent no-op.
+  unweighted <- hdcd_fit_dag(flat, true_structure)
+  u_grid <- seq(0.05, 0.95, by = 0.2)
+  changed <- FALSE
+  for (node in 2:3) {
+    n_parents <- length(hdcd_node_parents(flat, node))
+    if (n_parents > 0) {
+      z <- rep(0.1, n_parents)
+      d_flat <- exp(hdcd:::.local_fit_conditional_log_density(unweighted$dag_fit, node, u_grid, z))
+      d_gated <- exp(hdcd:::.local_fit_conditional_log_density(gated$dag_fit, node, u_grid, z))
+      if (any(abs(d_flat - d_gated) > 1e-8)) changed <- TRUE
+    }
+  }
+  expect_true(changed)
+})
+
+test_that("hdcd_node_region_score computes a region-restricted held-out score", {
+  X <- make_tail_dependent_chain_data(seed = 25)
+  model <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
+                     annealing_iterations = 60L, seed = 9L)
+
+  node <- 2L
+  n_parents <- length(hdcd_node_parents(model, node))
+  skip_if(n_parents == 0, "node 2 has no parents in this fit")
+
+  n_holdout <- 200
+  set.seed(99)
+  u_holdout <- runif(n_holdout)
+  z_holdout <- matrix(runif(n_holdout * n_parents), ncol = n_parents)
+
+  result <- hdcd_node_region_score(model, node, parent = 1,
+                                    u_holdout = u_holdout, z_holdout = z_holdout,
+                                    z_center = 0.5, z_window = 1.0) # window=1: every row qualifies
+  expect_equal(result$n, n_holdout)
+  expect_true(is.finite(result$mean_log_density))
+
+  empty_result <- hdcd_node_region_score(model, node, parent = 1,
+                                          u_holdout = u_holdout, z_holdout = z_holdout,
+                                          z_center = 5.0, z_window = 0.01) # no row can qualify
+  expect_equal(empty_result$n, 0L)
+  expect_true(is.na(empty_result$mean_log_density))
+})
+
 test_that("hdcd_sample raises a clear error, not silently returning garbage", {
   X <- make_chain_data(n = 100, seed = 13)
   model <- hdcd_fit(X, max_parents = 2L, annealing_iterations = 30L, seed = 3L)

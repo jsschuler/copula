@@ -637,6 +637,157 @@ static void test_corner_relief_invalid_arguments(void) {
     HDCD_PASS("corner_relief outside [0,1) is rejected");
 }
 
+static void test_corner_kde_default_matches_unweighted(void) {
+    /* corner_kde_gate = 0 (the memset/default_options() default) must
+     * reproduce exactly the same fit as before this option existed. */
+    size_t n = 500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_tail_dependent_data(n, 0.5, 81, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    hdcd_local_fit_options_t opt = default_options(41);
+    HDCD_CHECK_NEAR(opt.corner_kde_gate, 0.0, 1e-15); /* memset default, not an explicit default_options() line */
+    size_t parent = 0;
+    hdcd_local_fit_t *fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &opt, &fit) == HDCD_OK);
+    HDCD_CHECK(hdcd_local_fit_corner_side(fit, 0) == HDCD_CORNER_NONE);
+
+    hdcd_local_fit_free(fit);
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("corner_kde_gate=0 (the default) leaves every edge uncorrected, exactly as before this option existed");
+}
+
+static void test_corner_kde_selects_side_and_changes_fit_on_tail_dependent_data(void) {
+    /* Strong, genuinely tail-dependent data with an easily-cleared gate:
+     * a corner side must be selected, and the fit must measurably
+     * differ from the uncorrected one -- otherwise the option would be
+     * a silent no-op. */
+    size_t n = 1500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_tail_dependent_data(n, 0.6, 82, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    hdcd_local_fit_options_t opt_flat = default_options(42);
+    hdcd_local_fit_options_t opt_kde = default_options(42);
+    opt_kde.corner_kde_gate = 0.1;
+    opt_kde.corner_kde_bandwidth = 0.1;
+    opt_kde.corner_kde_weight = 1.0;
+    size_t parent = 0;
+
+    hdcd_local_fit_t *fit_flat = NULL;
+    hdcd_local_fit_t *fit_kde = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &opt_flat, &fit_flat) == HDCD_OK);
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &opt_kde, &fit_kde) == HDCD_OK);
+
+    HDCD_CHECK(hdcd_local_fit_corner_side(fit_kde, 0) != HDCD_CORNER_NONE);
+    HDCD_CHECK(hdcd_local_fit_corner_side(fit_flat, 0) == HDCD_CORNER_NONE); /* gate=0: never computed */
+
+    double log_flat, log_kde;
+    double u_val = 0.05, z_val = 0.05; /* near the corner, where the correction is most active */
+    HDCD_CHECK(hdcd_local_fit_log_density(fit_flat, u_val, &z_val, 1, &log_flat) == HDCD_OK);
+    HDCD_CHECK(hdcd_local_fit_log_density(fit_kde, u_val, &z_val, 1, &log_kde) == HDCD_OK);
+    HDCD_CHECK(fabs(log_flat - log_kde) > 1e-6);
+
+    hdcd_local_fit_free(fit_flat);
+    hdcd_local_fit_free(fit_kde);
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("corner_kde_gate selects a corner side and measurably changes the fit near the corner on tail-dependent data");
+}
+
+static void test_corner_kde_gated_off_matches_unweighted(void) {
+    /* A gate (0.9) essentially nothing clears: the corrected fit must
+     * exactly match a plain (corner_kde_gate=0) fit. */
+    size_t n = 600, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_gaussian_copula_data(n, 0.6, 83, u0, u1); /* Gaussian: no tail dependence at all */
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    hdcd_local_fit_options_t opt_flat = default_options(43);
+    hdcd_local_fit_options_t gated_opt = default_options(43);
+    gated_opt.corner_kde_gate = 0.9;
+    size_t parent = 0;
+
+    hdcd_local_fit_t *fit_flat = NULL;
+    hdcd_local_fit_t *gated_fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &opt_flat, &fit_flat) == HDCD_OK);
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &gated_opt, &gated_fit) == HDCD_OK);
+
+    HDCD_CHECK(hdcd_local_fit_corner_side(gated_fit, 0) == HDCD_CORNER_NONE);
+    HDCD_CHECK_NEAR(hdcd_local_fit_holdout_score(gated_fit), hdcd_local_fit_holdout_score(fit_flat), 1e-9);
+
+    hdcd_local_fit_free(fit_flat);
+    hdcd_local_fit_free(gated_fit);
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("corner_kde_gate is skipped (result matches the uncorrected fit) when no edge clears it");
+}
+
+static void test_corner_kde_root_node_trivial(void) {
+    size_t n = 20, d = 2;
+    double u[40];
+    uint8_t mask[40];
+    for (size_t i = 0; i < 40; i++) { u[i] = 0.5; mask[i] = 1; }
+
+    hdcd_local_fit_options_t opt = default_options(44);
+    opt.corner_kde_gate = 0.1;
+    hdcd_local_fit_t *fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 0, NULL, 0, &opt, &fit) == HDCD_OK);
+    HDCD_CHECK(hdcd_local_fit_corner_side(fit, 0) == HDCD_CORNER_NONE);
+
+    hdcd_local_fit_free(fit);
+    HDCD_PASS("root node's corner_kde diagnostics are trivial (nothing to correct)");
+}
+
+static void test_corner_kde_invalid_arguments(void) {
+    size_t n = 500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_gaussian_copula_data(n, 0.5, 84, u0, u1);
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    size_t parent = 0;
+    hdcd_local_fit_t *fit = NULL;
+
+    hdcd_local_fit_options_t bad_negative_gate = default_options(1);
+    bad_negative_gate.corner_kde_gate = -0.1;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_negative_gate, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    hdcd_local_fit_options_t bad_high_gate = default_options(1);
+    bad_high_gate.corner_kde_gate = 1.5;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_high_gate, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    hdcd_local_fit_options_t bad_bandwidth = default_options(1);
+    bad_bandwidth.corner_kde_gate = 0.1;
+    bad_bandwidth.corner_kde_bandwidth = -0.05;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_bandwidth, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    hdcd_local_fit_options_t bad_weight = default_options(1);
+    bad_weight.corner_kde_gate = 0.1;
+    bad_weight.corner_kde_weight = -1.0;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &bad_weight, &fit) == HDCD_ERROR_INVALID_ARGUMENT);
+
+    free(u0); free(u1); free(u); free(mask);
+    HDCD_PASS("corner_kde_gate outside [0,1], a negative bandwidth, and a negative weight are all rejected");
+}
+
 static void test_invalid_arguments(void) {
     size_t n = 50, d = 2;
     double u[100];
@@ -690,6 +841,11 @@ int main(void) {
     test_corner_relief_default_matches_unweighted();
     test_corner_relief_changes_the_fit();
     test_corner_relief_invalid_arguments();
+    test_corner_kde_default_matches_unweighted();
+    test_corner_kde_selects_side_and_changes_fit_on_tail_dependent_data();
+    test_corner_kde_gated_off_matches_unweighted();
+    test_corner_kde_root_node_trivial();
+    test_corner_kde_invalid_arguments();
     test_invalid_arguments();
     printf("All local_fit tests passed.\n");
     return 0;

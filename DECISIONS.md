@@ -1866,3 +1866,136 @@ behavior (`NA` when the grid was never supplied) and was updated to
 assert the new one. Full C, R, Python, and Julia suites reverified
 passing -- no ABI change (no struct fields added/removed), so no
 Python/Julia struct-mirror updates were needed this time.
+
+## Local nonparametric corner correction (Option B)
+
+Follow-up to the "no parametric copula assumptions" and "two undecided
+follow-ups" entries above: user decision was to pursue Option B (a
+local nonparametric density correction) over Option A (local basis
+augmentation), with an explicit requirement that tuning it be a
+MANUAL, ITERATIVE process -- not another auto-searched grid -- and that
+it be validated against genuinely held-out data, not the full sample.
+
+**Design, agreed before implementation:** combine the local correction
+with the raw Bernstein kernel ADDITIVELY, in RAW kernel space, after
+both terms are exponentiated -- never as a geometric blend in log
+space. This is the one specific, load-bearing lesson carried over from
+the removed EVT splice: its failure was not "wrong family," it was
+blending an already-normalized log-density against `g` (the Bernstein
+bilinear form, meaningless in isolation until Sinkhorn calibrates it)
+as if they lived on the same scale. Combining post-exp, additively,
+avoids that specific composition risk regardless of what the local
+term is. `hdcd_sinkhorn_fit` still normalizes the COMBINED raw kernel
+exactly as it always has -- this is guaranteed, not new machinery --
+but normalization guarantees validity, not quality, which is why this
+requires held-out empirical validation rather than being assumed to
+work from the architecture alone.
+
+**Mechanism**: `corner_kde_gate`/`corner_kde_bandwidth`/`corner_kde_weight`
+in `hdcd_local_fit_options_t`. Gating reuses `hdcd_tail_dependence_coefficient`
+exactly like `bernstein_degree_grid`/the removed EVT splice (independently
+recomputed, same accepted minor redundancy). A gated edge's corner side
+(`hdcd_corner_side_t`: NONE/LOWER/UPPER -- a LOCATION, not a family) is
+recorded once per node, before any grid search, and the edge's raw
+kernel becomes `raw_kernel_bernstein(u,z) + corner_kde_weight *
+corner_proximity(u,z) * local_kde(u,z)`, where `corner_proximity` is
+the same Gaussian-bump corner-distance taper used throughout this
+investigation (`corner_relief`'s edge_proximity, the removed EVT
+splice's evt_corner_weight), and `local_kde` is a genuine bivariate
+Gaussian-product KDE over the edge's TRAIN (u_child, z_parent) pairs.
+Deliberately excluded from `hdcd_run_annealing` (real per-node
+`O(n_train)`-per-raw-kernel-call cost, unlike `corner_relief`'s
+near-free reweighting) -- applies only to `hdcd_dag_fit`/`hdcd_fit_dag()`
+calls on an already-decided DAG, matching `bernstein_degree_grid`'s and
+the removed EVT splice's precedent. NO grid-searched variant of gate/
+bandwidth/weight exists, by design -- per the user's explicit "manual
+and iterative" requirement, these are meant to be set explicitly and
+adjusted by hand across repeated `hdcd_fit_dag()` calls, watching the
+result each time, never auto-optimized by this library.
+
+**A real bug, caught by testing on real data before shipping, not
+assumed correct from the math alone.** The first implementation
+deliberately dropped the KDE's volume-normalization constant
+(`1/(2*pi*h^2)` for a bivariate Gaussian product kernel), reasoning
+(incorrectly) that it needed to stay "raw/uncalibrated like the
+Bernstein term," conflating two different things: the actual fix for
+the EVT splice's failure was additive-raw-space combination, not "the
+local term must be badly scaled." Without the normalizing constant,
+dividing the kernel sum by `n_train` (~1500) crushed the correction to
+a magnitude that measurably changed nothing -- confirmed directly on
+the notebook's real vine-copula data: `Delta_KL` between corrected and
+uncorrected fits was 0.0002, and even at the exact corner (z=0.02), the
+two fits agreed to 3 decimal places. Restoring the normalizing constant
+(`local_kde_raw()` in `src/optimize/local_fit.c`) fixed this -- the
+correction now has a genuine, comparable order of magnitude to the
+quantity it's added to.
+
+**First manual-tuning-loop finding, logged as a starting point, not a
+calibrated default:** even after the normalization fix, `corner_kde_weight=1`
+(picked as a "neutral, equal-footing" default) still produced only a
+small effect (`Delta_KL=0.0037`, correlation gains of ~0.002-0.004) --
+the raw KDE and raw Bernstein kernel are evidently not naturally on
+comparable absolute scales, so "weight=1" was not actually neutral in
+practice. `corner_kde_weight=20` (same `corner_kde_bandwidth=0.08`)
+produced a clear, consistent positive effect on all four genuinely
+tail-dependent edges (correlation gains of 0.016-0.036, `Delta_KL=+0.05`)
+with the gated-out smooth edges completely unaffected. A quick check of
+`corner_kde_bandwidth=0.02` (tighter, to better resolve the sharp
+spike) at `weight=1` did NOT help -- plausibly because the same
+bandwidth parameter also controls the corner-proximity taper's width,
+so tightening it shrinks the region the correction is even allowed to
+act in, counteracting any sharper local resolution. This is exactly
+the kind of interaction the manual loop is for; it has not been
+explored further here, deliberately -- per the user's explicit
+direction, further tuning is a human-driven loop, not something this
+library should search on its own. `weight~20` at `bandwidth=0.08` is
+logged as a reasonable STARTING point for that loop, not a validated
+default (the C-level default stays `corner_kde_weight=1`, unchanged,
+since baking in an untested "better" value here would repeat exactly
+the mistake `hdcd_diagnose()` was built to avoid).
+
+**Manual, iterative tuning workflow, as implemented:** [hdcd_fit_dag()]
+gained `corner_kde_gate`/`corner_kde_bandwidth`/`corner_kde_weight`
+override arguments (defaulting to reusing `model`'s own settings, same
+pattern as every other override on that function) -- this is the
+intended entry point: call it repeatedly by hand with different values,
+inspecting the result after each call, rather than searching
+automatically. Two new tools support inspecting a call's result without
+needing the (unavailable, in a real application) true density:
+- `hdcd_node_corner_side(model, node, parent)`: which corner (if any) a
+  parent edge's correction targets -- `"none"`/`"lower"`/`"upper"`.
+- `hdcd_node_region_score(model, node, parent, u_holdout, z_holdout,
+  z_center, z_window)`: held-out log-likelihood restricted to rows
+  whose `parent`-th value falls within `z_window` of `z_center`, built
+  entirely from the existing `hdcd_local_fit_log_density`/its R
+  wrapper (no new C entry point needed -- an R-level loop over held-out
+  rows is fast enough at the row counts this diagnostic needs, roughly
+  the low hundreds per corner). Exists specifically because pooled
+  `Delta_KL`/`hdcd_score_dag()` is exactly what let the EVT splice's
+  local distortion hide inside a favorable aggregate -- this narrows
+  the same held-out evaluation to where a correction is supposed to
+  act. Always reports `n` (effective sample size) alongside the score,
+  since a small `n` means "can't tell," not a number to trust.
+
+**Outer-holdout carve-out needs no new plumbing.** Because
+`hdcd_fit_dag()` always uses whatever `model$U` it's given (with
+`model$local_seed` driving that call's OWN internal train/holdout
+split), a genuinely untouched outer holdout -- never seen by ANY
+fitting or tuning call, not just excluded from scoring -- is achieved
+simply by constructing a modified copy of `model` with `$U` restricted
+to a "dev" row subset chosen in R before any fitting begins, and
+holding the rest out entirely. All fitting/tuning iteration happens
+against `dev`; the genuine outer-holdout rows are only ever passed to
+`hdcd_node_region_score()`/manual histogram checks, read-only, once.
+
+Test coverage: five new C tests (`test_corner_kde_*`, mirroring
+`corner_relief`'s and `bernstein_degree_grid`'s test shapes: default is
+a no-op, gating selects a side and measurably changes the fit on
+tail-dependent data, gated-off matches unweighted exactly, root-node
+triviality, invalid arguments) plus two new R tests (`corner_kde_gate`
+selects a side and measurably changes the fit; `hdcd_node_region_score`
+computes a sensible score and correctly returns `NA`/`n=0` when no rows
+qualify). Python/Julia `HdcdLocalFitOptions` struct mirrors extended by
+the three new trailing fields (a real ABI change this time, unlike the
+diagnose/tune decoupling entry above) and both full suites reverified
+passing after reinstall.
