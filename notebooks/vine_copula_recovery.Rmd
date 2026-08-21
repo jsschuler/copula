@@ -557,6 +557,59 @@ is a more honest, if less tidy, takeaway than the first pass reached, and
 exactly what building the feature properly (rather than assuming the fix)
 was for.
 
+## Formalizing the diagnosis: `hdcd_diagnose()`
+
+Everything above found this corner under-fit by eyeballing the fitted
+curve against the *true* curve — a luxury available only because this
+notebook is a synthetic exercise with a known generator. A real,
+non-synthetic application has no true curve to compare against, so
+that diagnostic path doesn't exist there. `hdcd` now exposes the
+underlying empirical diagnostic directly, without requiring the ground
+truth: `hdcd_diagnose()`, run on a *plain* fit (`model` above — no
+`bernstein_degree_grid`, no `corner_relief`, nothing tuned) reports
+every node's tail-dependence coefficient before any decision about
+whether or how to tune has been made.
+
+```{r diagnose-plain-fit}
+diagnosis <- hdcd_diagnose(model)
+kable(diagnosis, row.names = FALSE, caption = "hdcd_diagnose() on the plain, untuned fit")
+```
+
+Without ever touching the true density, this correctly ranks the four
+genuinely Clayton/Gumbel edges at the top — nodes 2, 8, 3 (0.867, 0.800,
+0.689: edges 1->2, 7->8, 2->3, each with the Archimedean family as their
+node's only parent) and node 6 (0.644), which needs a word of
+explanation: the "Recovered vs. true DAG" comparison above found this
+particular annealing run reversed true edge 6->7 to 7->6, so node 7
+ends up with NO parents (a root, correctly excluded from this report —
+there is nothing to diagnose) while node 6 ends up with TWO, {5, 7},
+and its reported coefficient is the max across both. This is a genuine
+edge case worth pointing out explicitly: `hdcd_diagnose()` follows the
+DAG `hdcd` actually recovered, warts (a reversed edge) and all, not the
+"true" edge labels a synthetic exercise happens to know — in a real,
+non-synthetic application there is no other structure to diagnose
+against. The two Frank edges (nodes 4, 9) sit clearly at the bottom
+(0.067, 0.133). But it is not a clean binary split: the two Gaussian
+edges (node 5, $\rho=0.65$: 0.378; node 10, $\rho=0.45$: 0.244) report
+non-trivial coefficients despite having no Archimedean corner
+singularity and, asymptotically, no tail dependence at all — a known
+property of this empirical estimator at finite $n$, where stronger
+Gaussian correlation alone produces some apparent corner clustering.
+This is exactly why `hdcd_diagnose()` reports raw coefficients rather
+than a built-in flag: a fixed gate of, say, `0.3` would correctly catch
+all four genuine nodes but would also pull in the $\rho=0.65$ Gaussian
+edge; a gate of `0.5` would cleanly separate the four genuine nodes from
+everything else on this particular dataset, but there is no principled
+reason to expect `0.5` to be the right cutoff on different data — this
+investigation already found the right gate value varies by intervention
+and dataset (`0.05` for the `bernstein_degree_grid` demonstration below,
+`0.5` for the (now-removed) EVT splice after
+proper calibration; see `DECISIONS.md`). The number itself is the
+diagnostic; choosing what to do with it is a deliberate, separate
+step — which is exactly what the rest of this notebook, and
+`DECISIONS.md`'s "distinguish initial fit from diagnose from tune"
+entry, work through next.
+
 ## Following up: does raising bernstein_degree, done properly, help?
 
 The natural next lever, and a genuinely different question from the
@@ -1162,3 +1215,23 @@ cat(sprintf("Mean fitted-vs-true conditional density correlation: %.3f\n",
   most representative finding of this whole notebook's investigation
   into the genuine difficulties of high-dimensional, heavy-tailed
   modeling.
+- Formalized the whole investigation's implicit workflow into an
+  explicit one: **fit, then diagnose, then tune, as three separate
+  steps** (DECISIONS.md's "distinguish initial fit from diagnose from
+  tune" entry), rather than the "try a knob, eyeball a plot against the
+  (synthetic-only) true density" loop this notebook has otherwise been
+  running by hand. Closed a real gap found on inspection: the
+  tail-dependence coefficient was previously only ever computed
+  *inside* `bernstein_degree_grid`'s own gated code path, so a plain,
+  untuned fit could never expose it — you had to already commit to
+  tuning before you could see the evidence that would tell you whether
+  tuning was warranted. The coefficient is now always computed, and the
+  new `hdcd_diagnose()` reports it per node on a plain fit, correctly
+  ranking this notebook's four genuinely tail-dependent nodes at the
+  top without ever touching the true density (see "Formalizing the
+  diagnosis" above) — including correctly following a reversed edge
+  the annealing search actually produced, not the "true" edge labels
+  a synthetic exercise happens to know. It deliberately reports raw
+  evidence rather than a built-in threshold, since this investigation
+  already found the right gate value is intervention- and
+  dataset-dependent, not a universal constant.
