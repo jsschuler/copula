@@ -1029,14 +1029,29 @@ four genuinely tail-dependent edges:
 ```{r evt-splice-density-plot, fig.height=8}
 evt_cond_df <- evt_results$evt_cond_df
 
-ggplot(evt_cond_df, aes(u, density, color = source, linetype = source)) +
-  geom_line(linewidth = 0.7) +
+evt_tail_edges <- c(1, 2, 6, 7)
+evt_hist_rows <- list()
+for (i in evt_tail_edges) {
+  q <- if (i %in% c(2, 7)) 0.9 else 0.1
+  in_band <- abs(model$U[, i] - q) <= z_window
+  evt_hist_rows[[length(evt_hist_rows) + 1]] <- data.frame(
+    edge = sprintf("%d->%d  %s  (z = %.1f)", i, i + 1, family_names[i], q),
+    u = model$U[in_band, i + 1]
+  )
+}
+evt_hist_df <- do.call(rbind, evt_hist_rows)
+
+ggplot() +
+  geom_histogram(data = evt_hist_df, aes(u, after_stat(density)),
+                  bins = 20, fill = "grey65", color = "grey40", alpha = 0.6) +
+  geom_line(data = evt_cond_df, aes(u, density, color = source, linetype = source), linewidth = 0.7) +
   facet_wrap(~edge, scales = "free_y", ncol = 2) +
   scale_color_manual(values = c("true" = "black", "hdcd (unspliced)" = "steelblue",
                                  "hdcd (evt-spliced)" = "firebrick")) +
   theme_minimal(base_size = 9) +
   theme(legend.position = "top") +
-  labs(title = "True vs. unspliced vs. EVT-spliced conditional density at the tail-dependence corner",
+  labs(title = "True vs. unspliced vs. EVT-spliced conditional density, with an empirical conditional histogram",
+       subtitle = sprintf("histogram: observed rows with |u_parent - z| <= %.2f", z_window),
        x = expression(u[child]), y = "density")
 ```
 
@@ -1060,15 +1075,39 @@ actually is close enough:
 ```{r evt-splice-zoomed-corner, fig.height=8}
 evt_zoom_df <- evt_results$evt_zoom_df
 
-ggplot(evt_zoom_df, aes(u, density, color = source, linetype = source)) +
-  geom_line(linewidth = 0.7) +
+zoom_window <- 0.02 # tighter than z_window above -- this slice is deliberately much closer to the corner
+evt_zoom_hist_rows <- list()
+for (i in evt_tail_edges) {
+  is_gumbel <- i %in% c(2, 7)
+  q <- if (is_gumbel) 0.98 else 0.02
+  in_band <- abs(model$U[, i] - q) <= zoom_window
+  evt_zoom_hist_rows[[length(evt_zoom_hist_rows) + 1]] <- data.frame(
+    edge = sprintf("%d->%d  %s  (z = %.2f)", i, i + 1, family_names[i], q),
+    u = model$U[in_band, i + 1], n_in_band = sum(in_band)
+  )
+}
+evt_zoom_hist_df <- do.call(rbind, evt_zoom_hist_rows)
+
+ggplot() +
+  geom_histogram(data = evt_zoom_hist_df, aes(u, after_stat(density)),
+                  bins = 15, fill = "grey65", color = "grey40", alpha = 0.6) +
+  geom_line(data = evt_zoom_df, aes(u, density, color = source, linetype = source), linewidth = 0.7) +
   facet_wrap(~edge, scales = "free", ncol = 2) +
   scale_color_manual(values = c("true" = "black", "hdcd (unspliced)" = "steelblue",
                                  "hdcd (evt-spliced)" = "firebrick")) +
   theme_minimal(base_size = 9) +
   theme(legend.position = "top") +
-  labs(title = "Zoomed into the actual corner (z within 0.02 of 0 or 1)",
+  labs(title = "Zoomed into the actual corner (z within 0.02 of 0 or 1), with an empirical conditional histogram",
+       subtitle = sprintf("histogram: observed rows with |u_parent - z| <= %.2f", zoom_window),
        x = expression(u[child]), y = "density")
+```
+
+```{r evt-splice-zoomed-corner-counts}
+zoom_counts <- aggregate(n_in_band ~ edge, data = evt_zoom_hist_df, FUN = unique)
+cat(sprintf(
+  "Points per conditioning band at this deeper zoom: min = %d, median = %.0f, max = %d (out of n = %d observed rows)\n",
+  min(zoom_counts$n_in_band), median(zoom_counts$n_in_band), max(zoom_counts$n_in_band), n
+))
 ```
 
 **This is where you should be looking, and it reveals a real effect —
