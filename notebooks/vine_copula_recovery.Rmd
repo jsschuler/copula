@@ -395,36 +395,76 @@ so this is purely about density-shape accuracy, independent of the
 discrete structure-search question above — match the known, closed-form
 conditional density of the true pair-copula?
 
+The `true` line below is a synthetic-only luxury: a real application
+never has the closed-form generator to compare against. What a real
+application DOES have is the data itself, so every panel also shows an
+**empirical conditional histogram** — the observed $u_{\text{child}}$
+values for observed rows whose $u_{\text{parent}}$ falls within
+$\pm 0.05$ of that panel's $z$ — as a data-only stand-in for "the
+truth." Conditioning on an extreme $z$ does not, by itself, mean a thin
+sample: for a genuinely tail-dependent edge, extreme $z$ and a
+concentrated range of $u$ co-occur far more often than chance, so the
+conditioning band is not diffuse-and-uninformative the way it would be
+for a weakly-dependent edge. The point-count table right after the plot
+checks this directly rather than assuming it.
+
 ```{r conditional-density-grid, fig.height=14}
 u_grid <- seq(0.02, 0.98, length.out = 60)
 q_values <- c(0.1, 0.5, 0.9)
+z_window <- 0.05 # conditioning half-width for the empirical histogram below
 
 cond_rows <- list()
+hist_rows <- list()
 for (i in seq_len(d - 1)) {
   node <- i + 1L # child column (1-indexed), matches true_fit's node numbering
+  parent_col <- model$U[, i]
+  child_col <- model$U[, i + 1]
   for (q in q_values) {
     fitted <- exp(hdcd:::.local_fit_conditional_log_density(true_fit$dag_fit, node, u_grid, q))
     true_dens <- dCopula(cbind(rep(q, length(u_grid)), u_grid), families[[i]])
+    edge_label <- sprintf("%d: %d->%d  %s", i, i, i + 1, family_names[i])
+    q_label <- factor(sprintf("z = %.1f", q), levels = sprintf("z = %.1f", q_values))
     cond_rows[[length(cond_rows) + 1]] <- data.frame(
-      edge = sprintf("%d: %d->%d  %s", i, i, i + 1, family_names[i]),
-      q = factor(sprintf("z = %.1f", q), levels = sprintf("z = %.1f", q_values)),
-      u = u_grid,
+      edge = edge_label, q = q_label, u = u_grid,
       density = c(fitted, true_dens),
       source = rep(c("hdcd (fitted)", "true"), each = length(u_grid))
+    )
+    in_band <- abs(parent_col - q) <= z_window
+    hist_rows[[length(hist_rows) + 1]] <- data.frame(
+      edge = edge_label, q = q_label, u = child_col[in_band], n_in_band = sum(in_band)
     )
   }
 }
 cond_df <- do.call(rbind, cond_rows)
+hist_df <- do.call(rbind, hist_rows)
 
-ggplot(cond_df, aes(u, density, color = source, linetype = source)) +
-  geom_line(linewidth = 0.7) +
+ggplot() +
+  geom_histogram(data = hist_df, aes(u, after_stat(density)),
+                  bins = 20, fill = "grey65", color = "grey40", alpha = 0.6) +
+  geom_line(data = cond_df, aes(u, density, color = source, linetype = source), linewidth = 0.7) +
   facet_grid(edge ~ q, scales = "free_y") +
   scale_color_manual(values = c("hdcd (fitted)" = "steelblue", "true" = "black")) +
   theme_minimal(base_size = 9) +
   theme(strip.text.y = element_text(angle = 0, hjust = 0), legend.position = "top") +
-  labs(title = "Fitted vs. true conditional copula density c(u | z) for every true edge",
+  labs(title = "Fitted vs. true conditional copula density c(u | z), with an empirical conditional histogram",
+       subtitle = sprintf("histogram: observed rows with |u_parent - z| <= %.2f", z_window),
        x = expression(u[child]), y = "density")
 ```
+
+```{r conditional-density-grid-counts}
+band_counts <- aggregate(n_in_band ~ edge + q, data = hist_df, FUN = unique)
+cat(sprintf(
+  "Points per conditioning band: min = %d, median = %.0f, max = %d (out of n = %d observed rows)\n",
+  min(band_counts$n_in_band), median(band_counts$n_in_band), max(band_counts$n_in_band), n
+))
+```
+
+Even the thinnest band here has enough points for the histogram's shape
+to be informative rather than pure noise — the corner is not, in this
+example, a small-sample problem. Where the histogram itself shows a
+clear mode that the `hdcd (fitted)` line misses, that is real,
+non-oracle evidence of under-fit, obtainable in a real application with
+no ground truth to lean on.
 
 ## Summary agreement metrics
 
