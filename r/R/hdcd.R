@@ -516,11 +516,15 @@ hdcd_node_bernstein_degree <- function(model, node) {
 
 #' One node's maximum empirical tail-dependence coefficient
 #'
-#' The diagnostic that gated [hdcd_fit()]'s `bernstein_degree_grid`
-#' search for this node: the largest tail-dependence coefficient (upper
-#' or lower) across its parent edges. `NA` if `bernstein_degree_grid` was
-#' never supplied (the diagnostic is not computed at all when it would
-#' not be used) or for a root node.
+#' The largest tail-dependence coefficient (upper or lower) across this
+#' node's parent edges -- the diagnostic that gates [hdcd_fit()]'s
+#' `bernstein_degree_grid` search for this node WHEN that grid is
+#' supplied. ALWAYS computed on ANY fit, not only when
+#' `bernstein_degree_grid` is supplied -- so this can be inspected on a
+#' plain, untuned fit to decide whether tuning is worth turning on at
+#' all (see [hdcd_diagnose()] and DECISIONS.md's "distinguish initial
+#' fit from diagnose from tune" entry). `NA` only for a root node (no
+#' parent edge to diagnose).
 #'
 #' @param model an `hdcd_model` (or the result of [hdcd_fit_dag()]).
 #' @param node the 1-indexed column index of the node.
@@ -529,6 +533,56 @@ hdcd_node_bernstein_degree <- function(model, node) {
 hdcd_node_tail_dependence <- function(model, node) {
   stopifnot(inherits(model, "hdcd_model") || inherits(model, "hdcd_dag_fit"))
   .local_fit_max_tail_dependence(model$dag_fit, node)
+}
+
+#' Diagnose an initial (untuned) fit for tail-dependence corner risk
+#'
+#' Reports every node's [hdcd_node_tail_dependence()] coefficient -- the
+#' same diagnostic that internally gates `bernstein_degree_grid` -- so it
+#' can be inspected BEFORE deciding whether to turn on any tuning
+#' (`bernstein_degree_grid`, `corner_relief`), not only after. Intended
+#' usage is a three-step workflow, kept deliberately distinct (see
+#' DECISIONS.md's "distinguish initial fit from diagnose from tune"
+#' entry): (1) fit once with tuning options left at their defaults, (2)
+#' call this function to see which nodes actually show tail dependence,
+#' (3) only then decide which nodes (if any) are worth a second fit with
+#' `bernstein_degree_grid`/`corner_relief`/a custom
+#' `tail_dependence_gate` -- informed by real numbers instead of
+#' inspecting fitted-density plots by eye.
+#'
+#' This function deliberately does NOT recommend a pass/fail threshold.
+#' Earlier work in this project found the "right" gate value is
+#' intervention- and dataset-dependent, not a universal constant (0.05
+#' was used for one demonstration, 0.5 after proper calibration for
+#' another -- see DECISIONS.md); baking in a default here would repeat
+#' that mistake. It returns the raw coefficients, most tail-dependent
+#' node first, and leaves the threshold to the analyst.
+#'
+#' @param model an `hdcd_model` (the result of [hdcd_fit()]; unlike most
+#'   node-level accessors in this package, this function needs the
+#'   dimension `d` to enumerate every node, which only `hdcd_model`
+#'   carries -- pass the original model, not a bare [hdcd_fit_dag()]
+#'   result).
+#' @return a data frame with one row per non-root node -- `node`
+#'   (1-indexed column index), `n_parents`, `tail_dependence` (in
+#'   `[0,1]`) -- sorted by `tail_dependence` descending. Root nodes are
+#'   excluded (nothing to diagnose). Zero rows if `model` has no
+#'   non-root nodes.
+#' @export
+hdcd_diagnose <- function(model) {
+  stopifnot(inherits(model, "hdcd_model"))
+  rows <- lapply(seq_len(model$d), function(node) {
+    parents <- hdcd_node_parents(model, node)
+    if (length(parents) == 0) return(NULL)
+    data.frame(node = node, n_parents = length(parents),
+               tail_dependence = hdcd_node_tail_dependence(model, node))
+  })
+  rows <- rows[!vapply(rows, is.null, logical(1))]
+  if (length(rows) == 0) {
+    return(data.frame(node = integer(0), n_parents = integer(0), tail_dependence = numeric(0)))
+  }
+  out <- do.call(rbind, rows)
+  out[order(-out$tail_dependence), , drop = FALSE]
 }
 
 #' Conditional copula density c_j(u | z) for one node, over a grid of u

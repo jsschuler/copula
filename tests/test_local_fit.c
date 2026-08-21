@@ -343,6 +343,53 @@ static void test_roughness_grid_invalid_arguments(void) {
     HDCD_PASS("roughness grid rejects non-positive candidates, an out-of-range validation fraction, and insufficient data");
 }
 
+static void test_tail_dependence_diagnostic_available_without_any_grid(void) {
+    /* The whole point of decoupling this diagnostic from
+     * bernstein_degree_grid (see DECISIONS.md's "distinguish initial fit
+     * from diagnose from tune" entry): it must be inspectable on a
+     * PLAIN fit -- no bernstein_degree_grid, no corner_relief, nothing
+     * -- so a caller can decide whether tuning is warranted before
+     * opting into it, not only after. */
+    size_t n = 1500, d = 2;
+    double *u0 = (double *)malloc(n * sizeof(double));
+    double *u1 = (double *)malloc(n * sizeof(double));
+    make_tail_dependent_data(n, 0.6, 71, u0, u1); /* genuinely tail-dependent */
+    double *u = (double *)malloc(n * d * sizeof(double));
+    uint8_t *mask = (uint8_t *)malloc(n * d);
+    memcpy(&u[0 * n], u0, n * sizeof(double));
+    memcpy(&u[1 * n], u1, n * sizeof(double));
+    for (size_t i = 0; i < n * d; i++) mask[i] = 1;
+
+    hdcd_local_fit_options_t plain_opt = default_options(12); /* no grids, no corner_relief */
+    size_t parent = 0;
+    hdcd_local_fit_t *fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(u, mask, n, d, 1, &parent, 1, &plain_opt, &fit) == HDCD_OK);
+
+    double max_td = hdcd_local_fit_max_tail_dependence(fit);
+    HDCD_CHECK(!isnan(max_td));
+    HDCD_CHECK(max_td > 0.1); /* real tail dependence, correctly measured even though nothing was tuned */
+    HDCD_CHECK(hdcd_local_fit_selected_bernstein_degree(fit) == plain_opt.bernstein_degree); /* untouched: no grid supplied */
+
+    /* An independent-data control on the same plain (no-grid) options:
+     * the diagnostic should stay low, confirming it is not just always
+     * reporting a large number regardless of the data. */
+    double *v0 = (double *)malloc(n * sizeof(double));
+    double *v1 = (double *)malloc(n * sizeof(double));
+    make_gaussian_copula_data(n, 0.0, 72, v0, v1);
+    double *v = (double *)malloc(n * d * sizeof(double));
+    memcpy(&v[0 * n], v0, n * sizeof(double));
+    memcpy(&v[1 * n], v1, n * sizeof(double));
+    hdcd_local_fit_t *indep_fit = NULL;
+    HDCD_CHECK(hdcd_local_fit_node(v, mask, n, d, 1, &parent, 1, &plain_opt, &indep_fit) == HDCD_OK);
+    HDCD_CHECK(hdcd_local_fit_max_tail_dependence(indep_fit) < max_td);
+
+    hdcd_local_fit_free(fit);
+    hdcd_local_fit_free(indep_fit);
+    free(u0); free(u1); free(u); free(mask);
+    free(v0); free(v1); free(v);
+    HDCD_PASS("tail-dependence diagnostic is populated on a plain fit with no grid, correctly distinguishing tail-dependent from independent data");
+}
+
 static void test_degree_grid_gated_off_matches_fixed_degree(void) {
     /* A high gate (0.9) that essentially no ordinary dependency clears:
      * the degree search must be skipped even though a grid was supplied,
@@ -634,6 +681,7 @@ int main(void) {
     test_roughness_grid_picks_a_lighter_penalty();
     test_root_node_selected_lambda_is_nan();
     test_roughness_grid_invalid_arguments();
+    test_tail_dependence_diagnostic_available_without_any_grid();
     test_degree_grid_gated_off_matches_fixed_degree();
     test_degree_grid_activates_for_tail_dependent_data();
     test_joint_degree_lambda_search();

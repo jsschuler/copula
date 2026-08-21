@@ -1791,3 +1791,78 @@ pushing on the corner under-fit; otherwise "no intervention tried in
 this notebook resolves it" stands as this investigation's finding (see
 DECISIONS.md's EVT tail-splice entries above and the notebook's "Known
 limitation" section).
+
+## Distinguish initial fit from diagnose from tune
+
+User feedback after the EVT splice's removal: `hdcd`'s usage pattern
+should be explicit about THREE separate steps -- fit, diagnose, tune --
+rather than the ad hoc "try a knob, eyeball a plot, try another knob"
+loop this whole notebook investigation has been running manually. The
+concrete trigger: the notebook's fitted conditional copula density
+"is missing modes that occur near the edge of the support" -- confirmed
+to be the same Clayton/Gumbel tail-dependence corner phenomenon this
+log has been tracking all along, just stated in more general
+diagnostic language.
+
+**The gap found on inspection: the diagnostic itself (the empirical
+tail-dependence coefficient, `hdcd_tail_dependence_coefficient`) was
+only ever computed INSIDE the `bernstein_degree_grid`-gated code path
+in `hdcd_local_fit_node`** (`src/optimize/local_fit.c`). A caller who
+fit a PLAIN model (no `bernstein_degree_grid`, no `corner_relief`) could
+not inspect `hdcd_local_fit_max_tail_dependence()` at all -- it stayed
+NAN, because the coefficient was never computed unless the grid was
+already supplied. This made "diagnose, then decide whether to tune"
+structurally impossible: you had to already commit to tuning
+(`bernstein_degree_grid`) before you could see the number that would
+tell you whether tuning was warranted.
+
+**Fix: decouple the diagnostic from the tuning gate.** The empirical
+tail-dependence-coefficient computation in `hdcd_local_fit_node` now
+runs unconditionally for every non-root node, on ANY fit -- independent
+of whether `bernstein_degree_grid` is supplied. `degree_search_active`
+(whether the degree grid is actually searched) is now a separate
+boolean, gated on both `degree_grid_enabled` AND the coefficient
+clearing `tail_dependence_gate`, computed from the now-unconditional
+value rather than folding the "is this even computed" question into
+the same branch as "should this be acted on." The estimator itself is
+O(n) order statistics, not an optimization -- computing it
+unconditionally costs essentially nothing relative to the Theta fit
+that follows it. `hdcd_local_fit_max_tail_dependence()` is NAN only for
+a root node (nothing to diagnose) now, not also whenever the grid was
+withheld.
+
+**New R-level `hdcd_diagnose(model)`**: takes a PLAIN `hdcd_model` (the
+result of `hdcd_fit()` with no tuning options set) and returns a data
+frame -- one row per non-root node, `node`/`n_parents`/
+`tail_dependence`, sorted most-tail-dependent-first -- built entirely
+from the now-always-available `hdcd_node_tail_dependence()` accessor
+(no new C entry point needed). Deliberately does NOT bake in a
+pass/fail threshold: this investigation has already seen the "right"
+gate value vary by intervention and dataset (0.05 for one
+`bernstein_degree_grid` demonstration, 0.5 after properly calibrating
+the now-removed EVT splice) -- hard-coding a default here would repeat
+that mistake. It reports evidence; the analyst (or a future,
+evidence-based policy) decides the tuning gate. Only accepts
+`hdcd_model`, not a bare `hdcd_fit_dag()` result, since enumerating
+every node needs `model$d`, which only the former carries.
+
+**The resulting three-step workflow**: (1) `hdcd_fit()` with tuning
+options left at their defaults -- the initial fit; (2) `hdcd_diagnose()`
+on that result -- which nodes actually show tail dependence, by how
+much; (3) `hdcd_fit_dag()`/a re-`hdcd_fit()` call with
+`bernstein_degree_grid`/`corner_relief`/a chosen `tail_dependence_gate`
+-- tuning, now an informed, deliberate second step instead of a blind
+default or something discoverable only after already committing to it.
+
+Test coverage: a new C test
+(`test_tail_dependence_diagnostic_available_without_any_grid`) confirms
+the coefficient is populated (and correctly distinguishes tail-
+dependent from independent data) on a plain fit with no grid supplied
+at all; a new R test (`hdcd_diagnose reports tail-dependence on a
+plain, untuned fit`) exercises the new function end-to-end and confirms
+it rejects a bare `hdcd_fit_dag()` result. One existing R test
+(`bernstein_degree_grid is tail-dependence-gated...`) asserted the OLD
+behavior (`NA` when the grid was never supplied) and was updated to
+assert the new one. Full C, R, Python, and Julia suites reverified
+passing -- no ABI change (no struct fields added/removed), so no
+Python/Julia struct-mirror updates were needed this time.

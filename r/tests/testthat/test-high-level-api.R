@@ -112,7 +112,11 @@ test_that("bernstein_degree_grid is tail-dependence-gated and selects a per-node
   fixed <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
                      annealing_iterations = 60L, seed = 4L)
   expect_equal(hdcd_node_bernstein_degree(fixed, 2), 4L)
-  expect_true(is.na(hdcd_node_tail_dependence(fixed, 2))) # grid never supplied -> diagnostic not computed
+  # The diagnostic is ALWAYS computed, even with no grid supplied (see
+  # DECISIONS.md's "distinguish initial fit from diagnose from tune"
+  # entry) -- this data is genuinely tail-dependent, so it should read
+  # as such on a plain, untuned fit.
+  expect_true(hdcd_node_tail_dependence(fixed, 2) > 0)
 
   gated_off <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
                          annealing_iterations = 60L, seed = 4L,
@@ -141,6 +145,33 @@ test_that("bernstein_degree_grid is tail-dependence-gated and selects a per-node
   candidate <- hdcd_fit_dag(auto, hdcd_dag(auto))
   expect_s3_class(candidate, "hdcd_dag_fit")
   expect_true(is.numeric(hdcd_score_dag(auto, candidate)))
+})
+
+test_that("hdcd_diagnose reports tail-dependence on a plain, untuned fit", {
+  X <- make_tail_dependent_chain_data(seed = 23)
+
+  # A PLAIN fit: no bernstein_degree_grid, no corner_relief -- exactly
+  # the "initial fit" step of the fit -> diagnose -> tune workflow
+  # (DECISIONS.md's "distinguish initial fit from diagnose from tune"
+  # entry). hdcd_diagnose() must not require any tuning option to have
+  # been supplied first.
+  plain <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
+                     annealing_iterations = 60L, seed = 7L)
+
+  report <- hdcd_diagnose(plain)
+  expect_s3_class(report, "data.frame")
+  expect_true(all(c("node", "n_parents", "tail_dependence") %in% names(report)))
+  # Every non-root node appears, no root nodes, and it's genuinely
+  # informative (not all NA/zero) on data built to be tail-dependent.
+  expect_equal(nrow(report), sum(vapply(seq_len(plain$d), function(j) length(hdcd_node_parents(plain, j)) > 0, logical(1))))
+  expect_true(all(!is.na(report$tail_dependence)))
+  expect_true(max(report$tail_dependence) > 0)
+  # Sorted most-tail-dependent-first.
+  expect_true(all(diff(report$tail_dependence) <= 0))
+
+  # A bare hdcd_fit_dag() result (no $d) is explicitly out of scope.
+  candidate <- hdcd_fit_dag(plain, hdcd_dag(plain))
+  expect_error(hdcd_diagnose(candidate))
 })
 
 test_that("corner_relief changes the fit and defaults to a no-op", {

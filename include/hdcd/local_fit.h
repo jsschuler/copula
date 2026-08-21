@@ -99,7 +99,15 @@ typedef struct hdcd_local_fit_options {
      *     search is skipped, at zero extra cost) even though the grid
      *     was supplied.
      * `tail_dependence_gate` in [0,1]; 0 (the default when the degree
-     * grid is non-empty) means "always search," i.e. no gating. */
+     * grid is non-empty) means "always search," i.e. no gating.
+     *
+     * NOTE: the underlying diagnostic (hdcd_local_fit_max_tail_dependence())
+     * is computed on EVERY fit, not just when this grid is supplied --
+     * see its own doc comment below. This field only controls whether
+     * the diagnostic is ACTED on (a degree search); inspecting it first,
+     * on a plain fit with this field left empty, is the recommended way
+     * to decide whether to supply it at all (DECISIONS.md's "distinguish
+     * initial fit from diagnose from tune" entry). */
     const size_t *bernstein_degree_grid;
     size_t bernstein_degree_grid_size;
     double tail_dependence_gate;
@@ -193,10 +201,15 @@ double hdcd_local_fit_selected_lambda_roughness(const hdcd_local_fit_t *fit);
 size_t hdcd_local_fit_selected_bernstein_degree(const hdcd_local_fit_t *fit);
 
 /* This node's maximum empirical tail-dependence coefficient across its
- * parent edges (the diagnostic that gated the bernstein_degree_grid
- * search -- see hdcd_local_fit_options_t). NAN if bernstein_degree_grid
- * was empty/NULL (the diagnostic is not computed at all when it would
- * not be used), for a root node, or a NULL fit. */
+ * parent edges (spec section 18-style diagnostic; also gates the
+ * bernstein_degree_grid search when that grid is supplied -- see
+ * hdcd_local_fit_options_t). ALWAYS computed for a non-root node, on
+ * ANY fit -- independent of whether bernstein_degree_grid was supplied
+ * -- specifically so this can be inspected on a plain, untuned fit to
+ * decide whether tuning (bernstein_degree_grid, corner_relief) is
+ * warranted, per DECISIONS.md's "distinguish initial fit from diagnose
+ * from tune" entry. NAN only for a root node (no parent edge to
+ * diagnose) or a NULL fit. */
 double hdcd_local_fit_max_tail_dependence(const hdcd_local_fit_t *fit);
 
 int hdcd_local_fit_theta_converged(const hdcd_local_fit_t *fit);

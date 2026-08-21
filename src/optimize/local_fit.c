@@ -478,15 +478,25 @@ hdcd_status_t hdcd_local_fit_node(
                              ? options->theta_max_iterations : HDCD_LOCAL_FIT_DEFAULT_THETA_MAX_ITER;
     double theta_tol = (options->theta_tol > 0.0) ? options->theta_tol : HDCD_LOCAL_FIT_DEFAULT_THETA_TOL;
 
-    /* Tail-dependence gate for bernstein_degree_grid (spec section 18-
-     * style penalty-selection philosophy, applied to degree instead of
-     * lambda; see DECISIONS.md's "tail-dependence-informed bernstein_degree
-     * selection"). A pure descriptive diagnostic over ALL usable rows
-     * (train + holdout): it decides SEARCH STRATEGY, not a fitted
-     * parameter, so there is no leakage concern in using the full set. */
-    int degree_search_active = 0;
-    if (degree_grid_enabled) {
-        double max_tail_dep = 0.0;
+    /* Empirical tail-dependence diagnostic (spec section 18-style
+     * penalty-selection philosophy, applied to degree instead of lambda;
+     * see DECISIONS.md's "tail-dependence-informed bernstein_degree
+     * selection" and "distinguish initial fit from diagnose from tune"
+     * entries). A pure descriptive statistic over ALL usable rows (train
+     * + holdout): it does not fit anything, so there is no leakage
+     * concern in using the full set.
+     *
+     * ALWAYS computed for a non-root node, independent of whether
+     * bernstein_degree_grid is supplied -- this is what lets a caller
+     * inspect hdcd_local_fit_max_tail_dependence() on a PLAIN, untuned
+     * fit (no grids, no corner_relief) to decide WHETHER tuning is
+     * warranted, instead of only being able to see the diagnostic after
+     * already committing to bernstein_degree_grid's search. The
+     * estimator itself is O(n) per edge (order statistics, not an
+     * optimization), so computing it unconditionally is cheap relative
+     * to the Theta fit that follows. */
+    double max_tail_dep = 0.0;
+    {
         double *col_child = (double *)malloc(n_usable * sizeof(double));
         double *col_parent = (double *)malloc(n_usable * sizeof(double));
         if (col_child == NULL || col_parent == NULL) {
@@ -518,8 +528,9 @@ hdcd_status_t hdcd_local_fit_node(
         free(col_child);
         free(col_parent);
         fit->max_tail_dependence = max_tail_dep;
-        degree_search_active = (options->tail_dependence_gate <= 0.0) || (max_tail_dep >= options->tail_dependence_gate);
     }
+    int degree_search_active = degree_grid_enabled
+        && ((options->tail_dependence_gate <= 0.0) || (max_tail_dep >= options->tail_dependence_gate));
 
     size_t degree_candidates_buf[1];
     const size_t *degree_candidates;
