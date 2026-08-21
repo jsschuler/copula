@@ -1184,6 +1184,203 @@ design was never going to admit a parametric-family fix as a permanent
 feature, and empirically, even setting that constraint aside, the fix
 did not cleanly work.
 
+## A nonparametric corner correction, tuned manually and iteratively
+
+The removed EVT splice showed a real fix was possible in principle
+(the objectively correct family, correctly weighted, did move the fit)
+but assumed a parametric family this library's dependence-structure
+machinery must never assume. `hdcd` now has a second attempt at the
+same corner under-fit that stays fully nonparametric: a local
+correction built from a genuine kernel-density estimate over nearby
+training rows, combined additively with the raw Bernstein kernel
+*after* both are exponentiated — never as a geometric blend in log
+space, which is what actually broke the EVT splice (see
+`DECISIONS.md`'s "local nonparametric corner correction" entry).
+
+Two things make this section different from every fit shown so far in
+this notebook. First, by explicit design, `corner_kde_gate`/
+`corner_kde_bandwidth`/`corner_kde_weight` are **not** grid-searched —
+they are meant to be set by hand and adjusted iteratively, the same
+way this whole investigation's earlier calibration steps were (EVT's
+gate/bandwidth search was already manual; this makes that the rule,
+not an exception). Second, every check below uses a genuine three-way
+split — fitting rows, an inner-validation set for iterating by hand,
+and an outer holdout that is **never** passed to any fitting call at
+all, checked exactly once at the end — because a flexible local
+correction can, in principle, simply reproduce the exact points it was
+built from, and a check against the same rows it was fit on would be
+close to circular (see the earlier discussion this investigation had
+about exactly that risk).
+
+### A genuine three-way split
+
+```{r corner-kde-split}
+set.seed(2026)
+n_total <- nrow(model$U)
+perm <- sample(n_total)
+n_fit <- floor(0.6 * n_total)
+n_val <- floor(0.2 * n_total)
+fit_idx <- perm[1:n_fit]
+inner_val_idx <- perm[(n_fit + 1):(n_fit + n_val)]
+outer_holdout_idx <- perm[(n_fit + n_val + 1):n_total]
+
+model_dev <- model
+model_dev$U <- model$U[fit_idx, ] # ALL fitting below sees only these rows
+
+cat(sprintf(
+  "fit: %d rows, inner-validation: %d rows, outer holdout: %d rows (untouched by any fit below)\n",
+  length(fit_idx), length(inner_val_idx), length(outer_holdout_idx)
+))
+```
+
+Focusing on node 2 (edge 1->2, Clayton(3.0)) — the strongest signal in
+`hdcd_diagnose()`'s report above (tail-dependence coefficient 0.867)
+and the edge used throughout this notebook for exact numbers. A plain,
+uncorrected baseline fit on the fitting rows only:
+
+```{r corner-kde-baseline}
+baseline_dev <- hdcd_fit_dag(model_dev, recovered_edges)
+```
+
+### Round 1: a naive starting point
+
+`corner_kde_weight = 1` looks like the "neutral" choice — equal
+footing with the Bernstein term — but there is no reason to expect
+raw KDE values and raw Bernstein kernel values to naturally live on
+comparable scales, and, per `DECISIONS.md`, they do not:
+
+```{r corner-kde-round1}
+round1 <- hdcd_fit_dag(model_dev, recovered_edges,
+                        corner_kde_gate = 0.5, corner_kde_bandwidth = 0.08, corner_kde_weight = 1)
+cat(sprintf("edge 1->2 corner side selected: %s\n", hdcd_node_corner_side(round1, 2, 1)))
+
+score_baseline <- hdcd_node_region_score(baseline_dev, 2, 1,
+                                          u_holdout = model$U[inner_val_idx, 2],
+                                          z_holdout = model$U[inner_val_idx, 1, drop = FALSE],
+                                          z_center = 0.05, z_window = 0.05)
+score_round1 <- hdcd_node_region_score(round1, 2, 1,
+                                        u_holdout = model$U[inner_val_idx, 2],
+                                        z_holdout = model$U[inner_val_idx, 1, drop = FALSE],
+                                        z_center = 0.05, z_window = 0.05)
+cat(sprintf("region score (inner-validation, z near 0.05): baseline = %.4f (n=%d), weight=1 = %.4f (n=%d)\n",
+            score_baseline$mean_log_density, score_baseline$n,
+            score_round1$mean_log_density, score_round1$n))
+```
+
+```{r corner-kde-round1-plot, fig.height=3.2}
+plot_corner_check <- function(baseline_fit, corrected_fit, corrected_label, row_idx, z_center, z_window, title) {
+  in_band <- abs(model$U[row_idx, 1] - z_center) <= z_window
+  hist_df <- data.frame(u = model$U[row_idx, 2][in_band])
+  q <- z_center
+  fitted_base <- exp(hdcd:::.local_fit_conditional_log_density(baseline_fit$dag_fit, 2L, u_grid, q))
+  fitted_corr <- exp(hdcd:::.local_fit_conditional_log_density(corrected_fit$dag_fit, 2L, u_grid, q))
+  true_dens <- dCopula(cbind(rep(q, length(u_grid)), u_grid), families[[1]])
+  cond_df <- data.frame(
+    u = rep(u_grid, 3), density = c(true_dens, fitted_base, fitted_corr),
+    source = rep(c("true", "hdcd (baseline)", corrected_label), each = length(u_grid))
+  )
+  ggplot() +
+    geom_histogram(data = hist_df, aes(u, after_stat(density)), bins = 15,
+                    fill = "grey65", color = "grey40", alpha = 0.6) +
+    geom_line(data = cond_df, aes(u, density, color = source, linetype = source), linewidth = 0.7) +
+    scale_color_manual(values = c("true" = "black", "hdcd (baseline)" = "steelblue", setNames("firebrick", corrected_label))) +
+    theme_minimal(base_size = 9) + theme(legend.position = "top") +
+    labs(title = title, subtitle = sprintf("n=%d rows in band, z=%.2f +/- %.2f", sum(in_band), z_center, z_window),
+         x = expression(u[child]), y = "density")
+}
+plot_corner_check(baseline_dev, round1, "hdcd (weight=1)", inner_val_idx, 0.05, 0.05,
+                   "Round 1 (corner_kde_weight=1): inner-validation rows")
+```
+
+Barely any movement — the region score is nearly identical, and the
+plot shows the corrected curve sitting almost on top of the baseline.
+Consistent with what a weight of 1 turned out to mean in practice
+(`DECISIONS.md`): not neutral, just too weak to matter.
+
+### Round 2: increasing the weight
+
+```{r corner-kde-round2}
+round2 <- hdcd_fit_dag(model_dev, recovered_edges,
+                        corner_kde_gate = 0.5, corner_kde_bandwidth = 0.08, corner_kde_weight = 20)
+score_round2 <- hdcd_node_region_score(round2, 2, 1,
+                                        u_holdout = model$U[inner_val_idx, 2],
+                                        z_holdout = model$U[inner_val_idx, 1, drop = FALSE],
+                                        z_center = 0.05, z_window = 0.05)
+cat(sprintf("region score (inner-validation, z near 0.05): baseline = %.4f (n=%d), weight=20 = %.4f (n=%d)\n",
+            score_baseline$mean_log_density, score_baseline$n,
+            score_round2$mean_log_density, score_round2$n))
+```
+
+```{r corner-kde-round2-plot, fig.height=3.2}
+plot_corner_check(baseline_dev, round2, "hdcd (weight=20)", inner_val_idx, 0.05, 0.05,
+                   "Round 2 (corner_kde_weight=20): inner-validation rows")
+```
+
+A real, visible difference this time — the corrected curve pulls
+noticeably closer to the histogram's mode than the baseline does. This
+is the point in a genuinely manual loop where the choice is either
+"good enough, move to the final check" or "keep adjusting" — stopping
+here for this notebook, `corner_kde_weight=20` at `corner_kde_bandwidth=0.08`,
+without exploring further combinations (bandwidth in particular is
+left at its DECISIONS.md-logged starting value, not independently
+tuned) since the point of this section is to demonstrate the loop and
+its validation machinery, not to fully optimize this one edge.
+
+### The one honest final check
+
+Everything above used `inner_val_idx` — rows excluded from fitting, but
+inspected repeatedly while choosing `corner_kde_weight`. The outer
+holdout has not been touched by anything yet. Checking the chosen
+configuration against it, once:
+
+```{r corner-kde-final-check}
+score_baseline_final <- hdcd_node_region_score(baseline_dev, 2, 1,
+                                                u_holdout = model$U[outer_holdout_idx, 2],
+                                                z_holdout = model$U[outer_holdout_idx, 1, drop = FALSE],
+                                                z_center = 0.05, z_window = 0.05)
+score_final <- hdcd_node_region_score(round2, 2, 1,
+                                       u_holdout = model$U[outer_holdout_idx, 2],
+                                       z_holdout = model$U[outer_holdout_idx, 1, drop = FALSE],
+                                       z_center = 0.05, z_window = 0.05)
+cat(sprintf("region score (OUTER HOLDOUT, z near 0.05): baseline = %.4f (n=%d), weight=20 = %.4f (n=%d)\n",
+            score_baseline_final$mean_log_density, score_baseline_final$n,
+            score_final$mean_log_density, score_final$n))
+```
+
+```{r corner-kde-final-plot, fig.height=3.2}
+plot_corner_check(baseline_dev, round2, "hdcd (weight=20)", outer_holdout_idx, 0.05, 0.05,
+                   "Final check (corner_kde_weight=20): OUTER HOLDOUT, never used for fitting or iteration")
+```
+
+**The improvement holds up.** On the outer holdout — data untouched by
+both the fit and every iteration decision above — the region score
+moves from 1.118 to 1.264 ($n=36$), closely matching the
+inner-validation gain (1.164 to 1.312, $n=29$) that motivated stopping
+at `corner_kde_weight=20` in the first place. That agreement between
+inner-validation and outer-holdout is the honest signal this whole
+three-way-split exercise was built to check for: the gain is not an
+artifact of having looked at the inner-validation rows repeatedly while
+choosing a weight.
+
+**But look at the plot, not just the score.** The corrected curve
+visibly separates from the baseline and moves toward the histogram's
+mode — a real, non-circular, held-out-validated effect, on both metrics
+this notebook has learned to trust (a region-restricted proper score,
+and a histogram built from data the model never saw). It is still far
+short of the true peak (height $\approx 4$ against a true and empirical
+peak near $15$). This is a smaller effect than a maximally-tuned run
+might find — `corner_kde_bandwidth` was left at its untested starting
+value throughout, and only two weight values were tried by hand, on
+purpose, to demonstrate the loop and its validation machinery rather
+than to fully optimize one edge. What distinguishes this result from
+every other intervention in this notebook is not its size — it is that,
+for the first time, an improvement was checked against genuinely
+unseen data with a metric narrow enough to actually catch a local
+failure, rather than trusted from an aggregate score or a
+synthetic-truth comparison unavailable in a real application. Whether a
+further-tuned version of this correction can close the remaining gap
+is an open question for whoever picks up this manual loop next.
+
 # Summary
 
 ```{r summary}
@@ -1314,3 +1511,26 @@ cat(sprintf("Mean fitted-vs-true conditional density correlation: %.3f\n",
   evidence rather than a built-in threshold, since this investigation
   already found the right gate value is intervention- and
   dataset-dependent, not a universal constant.
+- A fifth intervention — a **local nonparametric corner correction**,
+  the successor to the removed EVT splice, built to fix the same
+  under-fit without assuming a parametric family (`corner_kde_gate`/
+  `corner_kde_bandwidth`/`corner_kde_weight`; see "A nonparametric
+  corner correction, tuned manually and iteratively" above and
+  `DECISIONS.md`) — is the first in this whole investigation to show a
+  genuine, held-out-validated improvement rather than a synthetic-truth
+  comparison or a pooled aggregate score that turned out to hide a
+  local failure. Building it required fixing a real bug first (an
+  initial version dropped the local KDE's volume-normalization
+  constant, crushing the correction to a numerical no-op) and, by
+  design, was never auto-tuned: `corner_kde_weight=1` looked like a
+  "neutral" starting point and did essentially nothing;
+  `corner_kde_weight=20`, found by one round of manual, by-hand
+  adjustment, produced a real gain in a corner-restricted held-out
+  score (not the pooled `Delta_KL` that hid the EVT splice's problem)
+  that closely agreed between an inner-validation set (iterated on
+  repeatedly) and a genuinely untouched outer holdout (checked exactly
+  once). The gain is real but modest — the corrected curve still falls
+  well short of the true corner spike — and this notebook deliberately
+  stopped after one round of tuning to demonstrate the loop and its
+  validation machinery rather than to fully optimize a single edge.
+  Whether further manual iteration closes more of the gap is left open.
