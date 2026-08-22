@@ -710,6 +710,120 @@ hdcd_node_region_score <- function(model, node, parent, u_holdout, z_holdout, z_
   list(mean_log_density = mean(log_c), n = n)
 }
 
+#' One round of the manual, iterative corner-KDE tuning loop
+#'
+#' Fits a single, hand-chosen `corner_kde_gate`/`corner_kde_bandwidth`/
+#' `corner_kde_weight` configuration, scores it against an uncorrected
+#' baseline via [hdcd_node_region_score()] (restricted to the SAME
+#' held-out rows for both, so the comparison is apples-to-apples), and
+#' prints a one-line summary. This does not search anything -- see
+#' DECISIONS.md's "local nonparametric corner correction" entry for why:
+#' call it once per parameter set you choose by hand, inspect the
+#' printed comparison and [hdcd_plot_corner_check()], then call again
+#' with adjusted values. `model_dev` must already be restricted to
+#' fitting rows only (see that same entry) -- `u_holdout`/`z_holdout`
+#' should come from rows NOT in `model_dev$U`: inner-validation rows
+#' while iterating, the outer holdout for the one final check.
+#'
+#' @param model_dev an `hdcd_model` restricted to fitting rows only.
+#' @param candidate_edges the structure to fit (see [hdcd_fit_dag()]).
+#' @param node,parent as in [hdcd_node_region_score()].
+#' @param corner_kde_gate,corner_kde_bandwidth,corner_kde_weight the
+#'   configuration being tried this round.
+#' @param u_holdout,z_holdout,z_center,z_window as in
+#'   [hdcd_node_region_score()].
+#' @param baseline optional: a previously-fit `hdcd_dag_fit` with
+#'   `corner_kde_gate=0` on the SAME `model_dev`/`candidate_edges`, to
+#'   avoid refitting it every round -- reuse the `baseline` field of a
+#'   previous call's return value. `NULL` (the default) fits one.
+#' @param ... additional arguments forwarded to [hdcd_fit_dag()].
+#' @return invisibly, a list with `fit` (the corrected `hdcd_dag_fit`),
+#'   `baseline`, `score` and `baseline_score` (both from
+#'   [hdcd_node_region_score()]), and the `node`/`parent`/`z_center`/
+#'   `z_window` used -- pass the whole result to
+#'   [hdcd_plot_corner_check()] to see it.
+#' @export
+hdcd_tune_corner <- function(model_dev, candidate_edges, node, parent,
+                              corner_kde_gate, corner_kde_bandwidth, corner_kde_weight,
+                              u_holdout, z_holdout, z_center, z_window,
+                              baseline = NULL, ...) {
+  stopifnot(inherits(model_dev, "hdcd_model"))
+  if (is.null(baseline)) {
+    baseline <- hdcd_fit_dag(model_dev, candidate_edges,
+                              corner_kde_gate = 0, corner_kde_bandwidth = 0, corner_kde_weight = 0, ...)
+  }
+  fit <- hdcd_fit_dag(model_dev, candidate_edges,
+                       corner_kde_gate = corner_kde_gate,
+                       corner_kde_bandwidth = corner_kde_bandwidth,
+                       corner_kde_weight = corner_kde_weight, ...)
+  baseline_score <- hdcd_node_region_score(baseline, node, parent, u_holdout, z_holdout, z_center, z_window)
+  score <- hdcd_node_region_score(fit, node, parent, u_holdout, z_holdout, z_center, z_window)
+  side <- hdcd_node_corner_side(fit, node, parent)
+  cat(sprintf(
+    "corner_kde_gate=%.3g, bandwidth=%.3g, weight=%.3g -> side=%s | region score: baseline=%.4f, corrected=%.4f (n=%d)\n",
+    corner_kde_gate, corner_kde_bandwidth, corner_kde_weight, side,
+    baseline_score$mean_log_density, score$mean_log_density, score$n
+  ))
+  invisible(list(fit = fit, baseline = baseline, score = score, baseline_score = baseline_score,
+                 node = node, parent = parent, z_center = z_center, z_window = z_window))
+}
+
+#' Plot one hdcd_tune_corner() round against a held-out conditional histogram
+#'
+#' Reuses the fit/baseline stored in `round` (the return value of
+#' [hdcd_tune_corner()]) and the SAME held-out rows used to compute its
+#' region score, so the plot and the printed comparison always describe
+#' the same rows and the same corner. Requires the `ggplot2` package
+#' (Suggests, not Imports -- this function is the only thing in `hdcd`
+#' that needs it).
+#'
+#' @param round the (invisible) list returned by [hdcd_tune_corner()].
+#' @param u_holdout,z_holdout the SAME held-out data passed to that
+#'   [hdcd_tune_corner()] call.
+#' @param true_density optional: a precomputed numeric vector, same
+#'   length as `u_grid`, giving the true conditional density at
+#'   `round$z_center` -- a synthetic-validation-only luxury (see
+#'   DECISIONS.md), never available in a real application. `NULL` (the
+#'   default) omits the true-density line and plots only the histogram
+#'   and the two fitted curves.
+#' @param u_grid evaluation grid for the fitted curves.
+#' @param title optional plot title.
+#' @return a ggplot object.
+#' @export
+hdcd_plot_corner_check <- function(round, u_holdout, z_holdout, true_density = NULL,
+                                    u_grid = seq(0.02, 0.98, length.out = 60), title = NULL) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    stop("hdcd_plot_corner_check() requires the ggplot2 package; install it or build the plot yourself from hdcd_node_region_score()'s inputs.")
+  }
+  z_holdout <- as.matrix(z_holdout)
+  in_band <- abs(z_holdout[, round$parent] - round$z_center) <= round$z_window
+  hist_df <- data.frame(u = u_holdout[in_band])
+  q <- round$z_center
+  fitted_base <- exp(.local_fit_conditional_log_density(round$baseline$dag_fit, round$node, u_grid, q))
+  fitted_corr <- exp(.local_fit_conditional_log_density(round$fit$dag_fit, round$node, u_grid, q))
+  cond_rows <- list(
+    data.frame(u = u_grid, density = fitted_base, source = "hdcd (baseline)"),
+    data.frame(u = u_grid, density = fitted_corr, source = "hdcd (corrected)")
+  )
+  if (!is.null(true_density)) {
+    cond_rows[[length(cond_rows) + 1]] <- data.frame(u = u_grid, density = true_density, source = "true")
+  }
+  cond_df <- do.call(rbind, cond_rows)
+  color_values <- c("hdcd (baseline)" = "steelblue", "hdcd (corrected)" = "firebrick", "true" = "black")
+  if (is.null(title)) {
+    title <- sprintf("node %d, parent %d: baseline vs. corrected, z=%.2f +/- %.2f",
+                      round$node, round$parent, round$z_center, round$z_window)
+  }
+  ggplot2::ggplot() +
+    ggplot2::geom_histogram(data = hist_df, ggplot2::aes(u, ggplot2::after_stat(density)),
+                             bins = 15, fill = "grey65", color = "grey40", alpha = 0.6) +
+    ggplot2::geom_line(data = cond_df, ggplot2::aes(u, density, color = source, linetype = source), linewidth = 0.7) +
+    ggplot2::scale_color_manual(values = color_values) +
+    ggplot2::theme_minimal(base_size = 9) + ggplot2::theme(legend.position = "top") +
+    ggplot2::labs(title = title, subtitle = sprintf("n=%d rows in band", sum(in_band)),
+                  x = expression(u[child]), y = "density")
+}
+
 #' Conditional copula density c_j(u | z) for one node, over a grid of u
 #'
 #' Evaluates the fitted conditional density directly (not via

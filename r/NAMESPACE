@@ -17,6 +17,8 @@ export(hdcd_node_tail_dependence)
 export(hdcd_node_corner_side)
 export(hdcd_diagnose)
 export(hdcd_node_region_score)
+export(hdcd_tune_corner)
+export(hdcd_plot_corner_check)
 
 S3method(predict, hdcd_model)
 S3method(print, hdcd_model)

@@ -1999,3 +1999,46 @@ qualify). Python/Julia `HdcdLocalFitOptions` struct mirrors extended by
 the three new trailing fields (a real ABI change this time, unlike the
 diagnose/tune decoupling entry above) and both full suites reverified
 passing after reinstall.
+
+## An interface for hand tuning: `hdcd_tune_corner()`/`hdcd_plot_corner_check()`
+
+The notebook's first manual-tuning demonstration (previous entry) took
+roughly 15 lines of boilerplate per round -- fit, compute two region
+scores, build a histogram data frame, plot -- repeated for each
+hand-chosen parameter set. User feedback: this needs an actual
+interface for hand tuning, not a pattern to retype every round.
+
+**`hdcd_tune_corner(model_dev, candidate_edges, node, parent,
+corner_kde_gate, corner_kde_bandwidth, corner_kde_weight, u_holdout,
+z_holdout, z_center, z_window, baseline = NULL, ...)`**: fits one
+hand-chosen configuration, scores it against an uncorrected baseline
+via `hdcd_node_region_score()` (both on the SAME held-out rows), prints
+a one-line comparison, and returns both fits invisibly so the caller
+can keep iterating or hand the result to the plot function. Accepts a
+previously-fit `baseline` (typically a prior call's own `$baseline`) so
+the uncorrected fit is not needlessly recomputed every round. Explicitly
+NOT a search -- one call per candidate the analyst picks, same as
+calling `hdcd_fit_dag()` directly, just with the comparison built in.
+This is a convenience wrapper around existing pieces
+(`hdcd_fit_dag()`, `hdcd_node_region_score()`, `hdcd_node_corner_side()`),
+not new fitting logic -- no C changes were needed for this entry.
+
+**`hdcd_plot_corner_check(round, u_holdout, z_holdout, true_density =
+NULL, u_grid = ..., title = NULL)`**: promotes the notebook's local
+`plot_corner_check()` helper into the package proper, built from a
+`hdcd_tune_corner()` result so the plot and the printed score always
+agree about which rows and which corner they describe. `true_density`
+is an optional, precomputed vector for synthetic-validation notebooks
+like this one -- deliberately NOT a `copula`-package dependency (a real
+application has no true density to plot, so the package itself should
+not need to know what `copula` objects are). Requires `ggplot2`, added
+as a `Suggests` (not `Imports`) dependency with a `requireNamespace()`
+check at call time -- the only function in the package that needs
+plotting, so the rest of `hdcd` stays free of a hard graphics
+dependency.
+
+Two new R tests (`hdcd_tune_corner` runs one round and returns
+reusable fits; the plot function returns a `ggplot` object, skipped
+if `ggplot2` isn't installed). No C-core or ABI changes this entry --
+pure R-layer wiring around already-existing pieces -- so Python/Julia
+bindings are unaffected and were not touched.

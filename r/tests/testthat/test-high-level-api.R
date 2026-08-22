@@ -286,6 +286,50 @@ test_that("hdcd_node_region_score computes a region-restricted held-out score", 
   expect_true(is.na(empty_result$mean_log_density))
 })
 
+test_that("hdcd_tune_corner runs one manual tuning round and hdcd_plot_corner_check plots it", {
+  X <- make_tail_dependent_chain_data(seed = 25)
+  model <- hdcd_fit(X, max_parents = 2L, bernstein_degree = 4L, lambda_roughness = 0.15,
+                     annealing_iterations = 60L, seed = 9L)
+  structure_edges <- hdcd_dag(model)
+
+  node <- 2L
+  n_parents <- length(hdcd_node_parents(model, node))
+  skip_if(n_parents == 0, "node 2 has no parents in this fit")
+
+  # A genuine three-way split, same shape as the notebook's: fitting
+  # rows never see the held-out rows used below.
+  n_total <- nrow(model$U)
+  set.seed(50)
+  perm <- sample(n_total)
+  fit_idx <- perm[1:floor(0.7 * n_total)]
+  val_idx <- perm[(floor(0.7 * n_total) + 1):n_total]
+  model_dev <- model
+  model_dev$U <- model$U[fit_idx, ]
+
+  u_val <- model$U[val_idx, node]
+  z_val <- model$U[val_idx, 1, drop = FALSE]
+
+  round1 <- hdcd_tune_corner(model_dev, structure_edges, node = node, parent = 1,
+                              corner_kde_gate = 0.1, corner_kde_bandwidth = 0.1, corner_kde_weight = 1,
+                              u_holdout = u_val, z_holdout = z_val, z_center = 0.1, z_window = 0.2)
+  expect_type(round1, "list")
+  expect_s3_class(round1$fit, "hdcd_dag_fit")
+  expect_s3_class(round1$baseline, "hdcd_dag_fit")
+  expect_true(is.finite(round1$score$mean_log_density) || is.na(round1$score$mean_log_density))
+
+  # Reusing round1's baseline must skip refitting it -- same object identity.
+  round2 <- hdcd_tune_corner(model_dev, structure_edges, node = node, parent = 1,
+                              corner_kde_gate = 0.1, corner_kde_bandwidth = 0.1, corner_kde_weight = 20,
+                              u_holdout = u_val, z_holdout = z_val, z_center = 0.1, z_window = 0.2,
+                              baseline = round1$baseline)
+  expect_identical(round2$baseline, round1$baseline)
+  expect_identical(round2$baseline_score, round1$baseline_score)
+
+  skip_if_not_installed("ggplot2")
+  p <- hdcd_plot_corner_check(round2, u_holdout = u_val, z_holdout = z_val)
+  expect_s3_class(p, "ggplot")
+})
+
 test_that("hdcd_sample raises a clear error, not silently returning garbage", {
   X <- make_chain_data(n = 100, seed = 13)
   model <- hdcd_fit(X, max_parents = 2L, annealing_iterations = 30L, seed = 3L)

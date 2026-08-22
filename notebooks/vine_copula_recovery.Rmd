@@ -1235,61 +1235,40 @@ cat(sprintf(
 
 Focusing on node 2 (edge 1->2, Clayton(3.0)) — the strongest signal in
 `hdcd_diagnose()`'s report above (tail-dependence coefficient 0.867)
-and the edge used throughout this notebook for exact numbers. A plain,
-uncorrected baseline fit on the fitting rows only:
+and the edge used throughout this notebook for exact numbers. Each
+round below is now a single [hdcd_tune_corner()] call instead of the
+~15 lines of hand-rolled fitting/scoring boilerplate an earlier version
+of this section used — the interface `DECISIONS.md`'s "an interface
+for hand tuning" entry asked for, built directly from that first
+manual pass rather than designed in the abstract beforehand.
 
-```{r corner-kde-baseline}
-baseline_dev <- hdcd_fit_dag(model_dev, recovered_edges)
+True density for the plots below (a synthetic-validation-only luxury,
+per [hdcd_plot_corner_check()]'s own documentation):
+
+```{r corner-kde-true-density}
+true_density_1_2 <- dCopula(cbind(rep(0.05, length(u_grid)), u_grid), families[[1]])
 ```
 
 ### Round 1: a naive starting point
 
 `corner_kde_weight = 1` looks like the "neutral" choice — equal
-footing with the Bernstein term — but there is no reason to expect
-raw KDE values and raw Bernstein kernel values to naturally live on
+footing with the Bernstein term — but there is no reason to expect raw
+KDE values and raw Bernstein kernel values to naturally live on
 comparable scales, and, per `DECISIONS.md`, they do not:
 
 ```{r corner-kde-round1}
-round1 <- hdcd_fit_dag(model_dev, recovered_edges,
-                        corner_kde_gate = 0.5, corner_kde_bandwidth = 0.08, corner_kde_weight = 1)
-cat(sprintf("edge 1->2 corner side selected: %s\n", hdcd_node_corner_side(round1, 2, 1)))
-
-score_baseline <- hdcd_node_region_score(baseline_dev, 2, 1,
-                                          u_holdout = model$U[inner_val_idx, 2],
-                                          z_holdout = model$U[inner_val_idx, 1, drop = FALSE],
-                                          z_center = 0.05, z_window = 0.05)
-score_round1 <- hdcd_node_region_score(round1, 2, 1,
-                                        u_holdout = model$U[inner_val_idx, 2],
-                                        z_holdout = model$U[inner_val_idx, 1, drop = FALSE],
-                                        z_center = 0.05, z_window = 0.05)
-cat(sprintf("region score (inner-validation, z near 0.05): baseline = %.4f (n=%d), weight=1 = %.4f (n=%d)\n",
-            score_baseline$mean_log_density, score_baseline$n,
-            score_round1$mean_log_density, score_round1$n))
+round1 <- hdcd_tune_corner(model_dev, recovered_edges, node = 2, parent = 1,
+                            corner_kde_gate = 0.5, corner_kde_bandwidth = 0.08, corner_kde_weight = 1,
+                            u_holdout = model$U[inner_val_idx, 2],
+                            z_holdout = model$U[inner_val_idx, 1, drop = FALSE],
+                            z_center = 0.05, z_window = 0.05)
 ```
 
 ```{r corner-kde-round1-plot, fig.height=3.2}
-plot_corner_check <- function(baseline_fit, corrected_fit, corrected_label, row_idx, z_center, z_window, title) {
-  in_band <- abs(model$U[row_idx, 1] - z_center) <= z_window
-  hist_df <- data.frame(u = model$U[row_idx, 2][in_band])
-  q <- z_center
-  fitted_base <- exp(hdcd:::.local_fit_conditional_log_density(baseline_fit$dag_fit, 2L, u_grid, q))
-  fitted_corr <- exp(hdcd:::.local_fit_conditional_log_density(corrected_fit$dag_fit, 2L, u_grid, q))
-  true_dens <- dCopula(cbind(rep(q, length(u_grid)), u_grid), families[[1]])
-  cond_df <- data.frame(
-    u = rep(u_grid, 3), density = c(true_dens, fitted_base, fitted_corr),
-    source = rep(c("true", "hdcd (baseline)", corrected_label), each = length(u_grid))
-  )
-  ggplot() +
-    geom_histogram(data = hist_df, aes(u, after_stat(density)), bins = 15,
-                    fill = "grey65", color = "grey40", alpha = 0.6) +
-    geom_line(data = cond_df, aes(u, density, color = source, linetype = source), linewidth = 0.7) +
-    scale_color_manual(values = c("true" = "black", "hdcd (baseline)" = "steelblue", setNames("firebrick", corrected_label))) +
-    theme_minimal(base_size = 9) + theme(legend.position = "top") +
-    labs(title = title, subtitle = sprintf("n=%d rows in band, z=%.2f +/- %.2f", sum(in_band), z_center, z_window),
-         x = expression(u[child]), y = "density")
-}
-plot_corner_check(baseline_dev, round1, "hdcd (weight=1)", inner_val_idx, 0.05, 0.05,
-                   "Round 1 (corner_kde_weight=1): inner-validation rows")
+hdcd_plot_corner_check(round1, u_holdout = model$U[inner_val_idx, 2],
+                        z_holdout = model$U[inner_val_idx, 1, drop = FALSE],
+                        true_density = true_density_1_2, u_grid = u_grid,
+                        title = "Round 1 (corner_kde_weight=1): inner-validation rows")
 ```
 
 Barely any movement — the region score is nearly identical, and the
@@ -1300,20 +1279,19 @@ Consistent with what a weight of 1 turned out to mean in practice
 ### Round 2: increasing the weight
 
 ```{r corner-kde-round2}
-round2 <- hdcd_fit_dag(model_dev, recovered_edges,
-                        corner_kde_gate = 0.5, corner_kde_bandwidth = 0.08, corner_kde_weight = 20)
-score_round2 <- hdcd_node_region_score(round2, 2, 1,
-                                        u_holdout = model$U[inner_val_idx, 2],
-                                        z_holdout = model$U[inner_val_idx, 1, drop = FALSE],
-                                        z_center = 0.05, z_window = 0.05)
-cat(sprintf("region score (inner-validation, z near 0.05): baseline = %.4f (n=%d), weight=20 = %.4f (n=%d)\n",
-            score_baseline$mean_log_density, score_baseline$n,
-            score_round2$mean_log_density, score_round2$n))
+round2 <- hdcd_tune_corner(model_dev, recovered_edges, node = 2, parent = 1,
+                            corner_kde_gate = 0.5, corner_kde_bandwidth = 0.08, corner_kde_weight = 20,
+                            u_holdout = model$U[inner_val_idx, 2],
+                            z_holdout = model$U[inner_val_idx, 1, drop = FALSE],
+                            z_center = 0.05, z_window = 0.05,
+                            baseline = round1$baseline) # reuse round1's baseline fit, don't refit it
 ```
 
 ```{r corner-kde-round2-plot, fig.height=3.2}
-plot_corner_check(baseline_dev, round2, "hdcd (weight=20)", inner_val_idx, 0.05, 0.05,
-                   "Round 2 (corner_kde_weight=20): inner-validation rows")
+hdcd_plot_corner_check(round2, u_holdout = model$U[inner_val_idx, 2],
+                        z_holdout = model$U[inner_val_idx, 1, drop = FALSE],
+                        true_density = true_density_1_2, u_grid = u_grid,
+                        title = "Round 2 (corner_kde_weight=20): inner-validation rows")
 ```
 
 A real, visible difference this time — the corrected curve pulls
@@ -1331,25 +1309,23 @@ its validation machinery, not to fully optimize this one edge.
 Everything above used `inner_val_idx` — rows excluded from fitting, but
 inspected repeatedly while choosing `corner_kde_weight`. The outer
 holdout has not been touched by anything yet. Checking the chosen
-configuration against it, once:
+configuration against it, once — same `hdcd_tune_corner()` call, just
+pointed at `outer_holdout_idx` instead, reusing round2's baseline again:
 
 ```{r corner-kde-final-check}
-score_baseline_final <- hdcd_node_region_score(baseline_dev, 2, 1,
-                                                u_holdout = model$U[outer_holdout_idx, 2],
-                                                z_holdout = model$U[outer_holdout_idx, 1, drop = FALSE],
-                                                z_center = 0.05, z_window = 0.05)
-score_final <- hdcd_node_region_score(round2, 2, 1,
-                                       u_holdout = model$U[outer_holdout_idx, 2],
-                                       z_holdout = model$U[outer_holdout_idx, 1, drop = FALSE],
-                                       z_center = 0.05, z_window = 0.05)
-cat(sprintf("region score (OUTER HOLDOUT, z near 0.05): baseline = %.4f (n=%d), weight=20 = %.4f (n=%d)\n",
-            score_baseline_final$mean_log_density, score_baseline_final$n,
-            score_final$mean_log_density, score_final$n))
+final_round <- hdcd_tune_corner(model_dev, recovered_edges, node = 2, parent = 1,
+                                 corner_kde_gate = 0.5, corner_kde_bandwidth = 0.08, corner_kde_weight = 20,
+                                 u_holdout = model$U[outer_holdout_idx, 2],
+                                 z_holdout = model$U[outer_holdout_idx, 1, drop = FALSE],
+                                 z_center = 0.05, z_window = 0.05,
+                                 baseline = round2$baseline)
 ```
 
 ```{r corner-kde-final-plot, fig.height=3.2}
-plot_corner_check(baseline_dev, round2, "hdcd (weight=20)", outer_holdout_idx, 0.05, 0.05,
-                   "Final check (corner_kde_weight=20): OUTER HOLDOUT, never used for fitting or iteration")
+hdcd_plot_corner_check(final_round, u_holdout = model$U[outer_holdout_idx, 2],
+                        z_holdout = model$U[outer_holdout_idx, 1, drop = FALSE],
+                        true_density = true_density_1_2, u_grid = u_grid,
+                        title = "Final check (corner_kde_weight=20): OUTER HOLDOUT, never used for fitting or iteration")
 ```
 
 **The improvement holds up.** On the outer holdout — data untouched by

@@ -10,4 +10,4 @@ Description: R bindings (spec section 26) for the hdcd C library:
 License: MIT
 Encoding: UTF-8
 Imports: methods
-Suggests: testthat, jsonlite
+Suggests: testthat, jsonlite, ggplot2
