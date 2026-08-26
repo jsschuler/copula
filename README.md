@@ -9,6 +9,52 @@ The full engineering and mathematical specification is
 open judgment calls and deviations from it are logged in
 [`DECISIONS.md`](DECISIONS.md).
 
+## Motivation
+
+Estimating a joint density `f_X` on `d` variables directly is hopeless once
+`d` is more than a handful: a fully nonparametric estimator needs a sample
+size that grows exponentially in `d` (the curse of dimensionality), while a
+parametric family buys tractability only by risking gross misspecification
+of the dependence structure. This library splits the problem so that neither
+horn of that dilemma bites.
+
+1. **Separate the marginals from the dependence (Sklar's theorem).**
+   `f_X(x) = c(F_1(x_1), ..., F_d(x_d)) * prod_j f_j(x_j)`. Each marginal
+   `f_j` is a one-dimensional problem — estimated nonparametrically with a
+   Gaussian-mixture smoother, so no shape is imposed on the body of the
+   distribution — and the entire `d`-dimensional difficulty is pushed into
+   the copula density `c` on the unit cube `[0,1]^d`, where the marginals
+   are uniform by construction and only dependence remains.
+
+2. **Make the copula's dimensionality tractable with a sparse
+   factorization.** A generic nonparametric `c` on `[0,1]^d` is still
+   cursed. Instead `c` is written as a product of low-dimensional
+   conditional factors along a DAG. Real multivariate data is typically
+   governed by dependence that is *sparse* — each variable interacts
+   strongly with only a few others — so a DAG with a small maximum
+   in-degree can represent `c` well with a number of parameters that grows
+   roughly linearly, not exponentially, in `d`. The variable ordering comes
+   from persistent-topology / MST analysis of the pairwise
+   distance-correlation matrix (which captures nonlinear dependence, not
+   just linear correlation), and the edge set is chosen by penalized
+   held-out fit via simulated annealing.
+
+3. **Keep the dependence model nonparametric and the result a valid
+   density.** Each conditional factor is a centered Bernstein tensor basis
+   (flexible, differentiable, no parametric copula family assumed) with a
+   roughness penalty; continuous Sinkhorn normalization forces every factor
+   to have uniform marginals, so the fitted `c` is a genuine copula density
+   and `f_X` integrates to one.
+
+What this yields: a density estimator that scales to high `d` under a
+sparsity assumption on the dependence rather than a parametric one;
+node-wise composite likelihood that uses every observation despite
+arbitrary missingness; and a common yardstick — held-out KL divergence
+against the flexible reference fit — for scoring *any* alternative
+factorization, including a scientifically motivated causal DAG. That
+comparison measures distributional adequacy of the proposed factorization;
+it does not by itself establish causal direction.
+
 ## What it does
 
 The joint density is represented as
